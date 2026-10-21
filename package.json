@@ -1,0 +1,100 @@
+{
+  "name": "sunat-consulta-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bot local para listar y descargar comprobantes emitidos/recibidos desde el portal SUNAT (SOL)",
+  "main": "electron/main.js",
+  "bin": {
+    "sunat-consulta": "src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/cli.js",
+    "consulta": "node src/cli.js",
+    "ui": "vite build && node src/server.js",
+    "dev:ui": "vite",
+    "build:ui": "vite build",
+    "typecheck": "tsc --noEmit",
+    "doctor": "node src/cli.js --doctor",
+    "install:browser": "npx playwright install chromium",
+    "check": "node --check src/cli.js && node --check src/server.js && node --check src/sunat-client.js && node --check src/ubl.js && node --check src/exporters.js && node --check src/dates.js && node --check src/util.js && node --check electron/main.js && node --check scripts/install-browsers-local.js",
+    "electron:dev": "npm run build:ui && electron .",
+    "dist:win": "npm run build:ui && npm run install:browsers:local && electron-builder --win nsis portable",
+    "dist:win:dir": "npm run build:ui && npm run install:browsers:local && electron-builder --win --dir",
+    "install:browsers:local": "node scripts/install-browsers-local.js"
+  },
+  "dependencies": {
+    "@radix-ui/react-dialog": "^1.3.1",
+    "@radix-ui/react-label": "^2.1.17",
+    "@radix-ui/react-popover": "^1.3.1",
+    "@radix-ui/react-select": "^2.4.1",
+    "@radix-ui/react-slot": "^1.5.0",
+    "adm-zip": "^0.5.16",
+    "archiver": "^8.0.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.4.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "fast-xml-parser": "^4.5.3",
+    "lucide-react": "^0.562.0",
+    "playwright": "^1.59.0",
+    "prompts": "^2.4.2",
+    "react": "^19.3.1",
+    "react-day-picker": "^9.14.0",
+    "react-dom": "^19.3.1",
+    "tailwind-merge": "^3.7.0",
+    "tw-animate-css": "^1.4.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^44.9.3",
+    "electron-builder": "^26.15.3",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7"
+  },
+  "author": "pasalaboleta",
+  "build": {
+    "appId": "com.pasalaboleta.consulta-sunat",
+    "productName": "Consulta SUNAT",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "asar": false,
+    "files": [
+      "electron/**/*",
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "ui-dist",
+        "to": "ui-dist"
+      },
+      {
+        "from": "playwright-browsers",
+        "to": "playwright-browsers"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}-${arch}.${ext}"
+    }
+  },
+  "packageManager": "pnpm@11.18.0"
+}

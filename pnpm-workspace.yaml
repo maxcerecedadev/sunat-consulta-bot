@@ -1,0 +1,12 @@
+allowBuilds:
+  esbuild: true
+  electron: true
+  electron-winstaller: true
+  "@parcel/watcher": true
+minimumReleaseAgeExclude:
+  - electron@44.9.3
+onlyBuiltDependencies:
+  - esbuild
+  - electron
+  - electron-winstaller
+  - "@parcel/watcher"

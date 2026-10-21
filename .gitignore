@@ -1,0 +1,8 @@
+node_modules/
+.env
+.session/
+output/
+ui-dist/
+*.log
+dist-electron/
+playwright-browsers/
