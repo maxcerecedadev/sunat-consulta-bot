@@ -14,6 +14,8 @@ import {
   Trash2,
 } from "lucide-react";
 
+import packageInfo from "../../package.json";
+
 import { DateRangePicker, type DateRange } from "@/components/date-range-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -546,8 +548,8 @@ export default function App() {
               </p>
             </div>
           </div>
-          <Badge variant="outline" className="border-success/30 bg-success/10 text-success">
-            Local · 127.0.0.1
+          <Badge variant="outline" className="border-border/70 bg-muted/40 text-muted-foreground">
+            v{packageInfo.version}
           </Badge>
         </div>
       </header>
