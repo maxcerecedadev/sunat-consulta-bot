@@ -118,7 +118,7 @@ El JSON es el más completo: incluye emisor, cliente, totales, ítems y rutas de
    - **Emitidas/rechazadas**: navega el menú SOL hasta **Empresas → Comprobantes de pago → SEE - SOL → Factura Electrónica → Consultar Factura y Nota** (facturas) o **Boleta de Venta Electrónica → Consultar Boleta de Venta y Nota** (boletas), detecta la URL real del iframe y consulta por rango de fechas.
    - **Recibidas (11/14/16)**: obtiene el token del menú SOL para **SIRE RCE**, descarga la propuesta del mes y la usa como lista de comprobantes. Luego consulta cada uno en **Consulta de Comprobante de Pago** y baja XML, PDF y CDR.
 3. Extrae el detalle UBL 2.1 desde el XML de cada comprobante.
-4. Guarda todo en la carpeta de salida. Las recibidas se procesan con concurrencia configurable (`SUNAT_CONCURRENCY`, default 3) porque SUNAT tarda ~10 s por archivo.
+4. Guarda todo en la carpeta de salida. Las recibidas se procesan con concurrencia configurable (`SUNAT_CONCURRENCY`, default 2) porque SUNAT tarda ~10 s por archivo.
 
 La sesión se reutiliza durante 10 minutos en `.session/<RUC>.json` para no iniciar sesión por cada archivo (las consultas a recibidas hacen login limpio).
 
@@ -129,7 +129,7 @@ La sesión se reutiliza durante 10 minutos en `.session/<RUC>.json` para no inic
 - El **CDR** solo se guarda si viene dentro del ZIP que entrega el módulo. Si no viene, no hay forma de recuperarlo retroactivamente desde SUNAT.
 - El detalle por ítem sale del **XML**; el listado del portal no lo incluye.
 - Las **recibidas** se consultan por mes (SIRE RCE); no se puede pedir un rango de varios meses en una sola consulta.
-- Las recibidas se procesan en paralelo (`SUNAT_CONCURRENCY`, default 3) porque SUNAT tarda ~10 s por archivo. Bájalo si SUNAT responde con errores.
+- Las recibidas se procesan en paralelo (`SUNAT_CONCURRENCY`, default 2) porque SUNAT tarda ~10 s por archivo. Si SUNAT responde con error 500, el bot reintenta los fallidos al final; puedes bajar la concurrencia a 1.
 - Las emitidas se procesan de forma secuencial para no saturar el portal.
 - No compartas `.env` ni `.session/`: contienen credenciales o cookies de tu cuenta.
 

@@ -1041,7 +1041,12 @@ class SunatClient {
     for (const numero of numbers) {
       const url = `${CONSULTACPE_API}/${invoice.ruc_emisor}-${invoice.tipo}-${invoice.serie}-${numero}-2${suffix}`;
 
-      for (let attempt = 0; attempt < 4; attempt++) {
+      for (let attempt = 0; attempt < 6; attempt++) {
+        // SUNAT responde lento y devuelve 500 si se hacen muchas llamadas
+        // seguidas. Este pequeño desfase evita que las descargas concurrentes
+        // salgan exactamente al mismo tiempo.
+        await sleep(500 + Math.floor(Math.random() * 1200));
+
         const response = await this.context.request.get(url, {
           headers: this.consultacpeHeaders(token),
           timeout: 120000,
@@ -1073,10 +1078,16 @@ class SunatClient {
         );
 
         if (response.status() === 404 || response.status() === 400) break;
+
         if (response.status() >= 500 || response.status() === 429) {
-          await sleep(5000 * (attempt + 1));
+          const wait = [5000, 10000, 20000, 30000, 45000, 60000][attempt] || 60000;
+          this.log(
+            `SUNAT respondió ${response.status()}; reintentando en ${Math.round(wait / 1000)}s...`,
+          );
+          await sleep(wait + Math.floor(Math.random() * 2000));
           continue;
         }
+
         break;
       }
     }

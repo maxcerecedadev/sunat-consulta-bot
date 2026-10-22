@@ -369,10 +369,10 @@ async function runJob(job, credentials, options) {
 
       if (!options.soloListar) {
         if (options.sire) client.log(`Descargando ${invoice.numero_desc}...`);
+        const base = safeName(invoice);
 
         try {
           const xml = await client.descargar(invoice, "xml");
-          const base = safeName(invoice);
 
           if (options.descargarXml) {
             const xmlPath = path.join(job.outputDir, "xml", `${base}.xml`);
@@ -407,19 +407,32 @@ async function runJob(job, credentials, options) {
             fs.writeFileSync(cdrPath, xml.cdr, "utf8");
             record.files.cdr = `cdr/R-${base}.xml`;
           }
-
-          if (options.descargarPdf) {
-            try {
-              const pdf = await client.descargar(invoice, "pdf");
-              const pdfPath = path.join(job.outputDir, "pdf", `${base}.pdf`);
-              fs.writeFileSync(pdfPath, pdf.content);
-              record.files.pdf = `pdf/${base}.pdf`;
-            } catch (error) {
-              record.error = [record.error, `PDF: ${error.message}`].filter(Boolean).join(" | ");
-            }
-          }
         } catch (error) {
-          record.error = error.message;
+          record.error = `XML: ${error.message}`;
+        }
+
+        // Si el XML falló, el CDR puede seguir disponible por separado.
+        if (options.sire && !record.files.cdr) {
+          try {
+            const cdr = await client.descargar(invoice, "cdr");
+            const cdrPath = path.join(job.outputDir, "cdr", `R-${base}.xml`);
+            fs.writeFileSync(cdrPath, cdr.content);
+            record.files.cdr = `cdr/R-${base}.xml`;
+          } catch (error) {
+            record.error = [record.error, `CDR: ${error.message}`].filter(Boolean).join(" | ");
+          }
+        }
+
+        // El PDF se intenta aunque el XML haya fallado.
+        if (options.descargarPdf) {
+          try {
+            const pdf = await client.descargar(invoice, "pdf");
+            const pdfPath = path.join(job.outputDir, "pdf", `${base}.pdf`);
+            fs.writeFileSync(pdfPath, pdf.content);
+            record.files.pdf = `pdf/${base}.pdf`;
+          } catch (error) {
+            record.error = [record.error, `PDF: ${error.message}`].filter(Boolean).join(" | ");
+          }
         }
       }
 
@@ -429,17 +442,25 @@ async function runJob(job, credentials, options) {
     // SIRE/consultacpe responde lento (~10 s por archivo); se procesan varios
     // comprobantes en paralelo para que 100 compras no tarden una hora.
     const concurrency = options.sire
-      ? Math.min(Math.max(Number(process.env.SUNAT_CONCURRENCY || 3), 1), 5)
+      ? Math.min(Math.max(Number(process.env.SUNAT_CONCURRENCY || 2), 1), 5)
       : 1;
+
+    const processed = [];
 
     for (let index = 0; index < invoices.length; index += concurrency) {
       if (job.cancelled) break;
 
       const chunk = invoices.slice(index, index + concurrency);
-      const records = await Promise.all(chunk.map((invoice) => processInvoice(invoice)));
+      const items = await Promise.all(
+        chunk.map(async (invoice) => ({
+          invoice,
+          record: await processInvoice(invoice),
+        })),
+      );
 
-      for (const record of records) {
-        job.invoices.push(record);
+      for (const item of items) {
+        job.invoices.push(item.record);
+        processed.push(item);
         job.processed = job.invoices.length;
         job.message = `${job.processed} de ${job.total} comprobante(s) procesado(s)...`;
       }
@@ -447,8 +468,37 @@ async function runJob(job, credentials, options) {
       await sleep(options.sire ? 800 : 300);
     }
 
+    // SIRE/consultacpe devuelve 500 intermitentes. Se reintentan una vez, de
+    // forma secuencial, solo los comprobantes que quedaron con error.
+    if (options.sire && !job.cancelled) {
+      const failed = processed.filter((item) => item.record.error);
+
+      if (failed.length > 0) {
+        client.log(`Reintentando ${failed.length} comprobante(s) con error...`);
+        job.message = `Reintentando ${failed.length} comprobante(s) con error...`;
+
+        for (const item of failed) {
+          if (job.cancelled) break;
+          await sleep(5000);
+          client.log(`Reintentando ${item.invoice.numero_desc}...`);
+
+          const retry = await processInvoice(item.invoice);
+          const index = job.invoices.findIndex((record) => record.id === item.record.id);
+          if (index >= 0) job.invoices[index] = retry;
+
+          const pending = job.invoices.filter((record) => record.error).length;
+          job.message = `Reintento: ${pending} comprobante(s) con error...`;
+        }
+      }
+    }
+
+    const errorCount = job.invoices.filter((record) => record.error).length;
     job.status = job.cancelled ? "cancelled" : "done";
-    job.message = job.cancelled ? "Consulta cancelada." : "Consulta completada.";
+    job.message = job.cancelled
+      ? "Consulta cancelada."
+      : errorCount > 0
+        ? `Consulta completada con ${errorCount} comprobante(s) con error.`
+        : "Consulta completada.";
     writeOutputs(job);
   } catch (error) {
     if (job.cancelled) {
