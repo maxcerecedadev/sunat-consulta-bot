@@ -17,6 +17,11 @@ const MENU_URLS = [
   "https://e-menu.sunat.gob.pe/cl-ti-itmenucabina/MenuInternet.htm",
 ];
 const STATE_TTL_MS = Number(process.env.SUNAT_STATE_TTL_MS || 10 * 60 * 1000);
+const SIRE_API = "https://api-sire.sunat.gob.pe/v1/contribuyente/migeigv/libros";
+const CONSULTACPE_API =
+  "https://api-cpe.sunat.gob.pe/v1/contribuyente/consultacpe/comprobantes";
+const TIPOS_RECIBIDOS = new Set(["11", "14", "16"]);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const TIPOS = {
   10: "Facturas emitidas",
@@ -39,6 +44,12 @@ const DOCUMENTOS = {
   factura: "Facturas",
   boleta: "Boletas",
 };
+
+// SUNAT responde con codeError != 0 cuando no hay resultados (por ejemplo en
+// "Facturas recibidas" si el periodo no tiene comprobantes). No es un fallo de
+// la consulta: el listado simplemente está vacío.
+const SIN_RESULTADOS_RE =
+  /no\s+(?:se\s+)?(?:encontr|existen|hay|existe)|sin\s+(?:resultados|registros|comprobantes|informaci[oó]n)|no\s+existen\s+(?:registros|comprobantes|documentos|informaci[oó]n)/i;
 
 /**
  * El código 10-16 es el mismo para el módulo de facturas y el de boletas;
@@ -75,6 +86,30 @@ function freshState(statePath) {
   } catch {
     return false;
   }
+}
+
+function normalizeKey(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function sireValue(row, ...names) {
+  const entries = Object.entries(row || {});
+  for (const name of names) {
+    const wanted = normalizeKey(name);
+    const match = entries.find(([key]) => normalizeKey(key) === wanted);
+    if (match && String(match[1]).trim() !== "") return String(match[1]).trim();
+  }
+  return "";
+}
+
+function toSireNumber(value) {
+  const parsed = Number(String(value || "").replace(/,/g, ""));
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function normalizeInvoice(raw) {
@@ -138,6 +173,8 @@ class SunatClient {
     this.solUser = String(options.solUser || "").trim();
     this.solPassword = String(options.solPassword || "");
     this.documento = options.documento === "boleta" ? "boleta" : "factura";
+    this.sire = Boolean(options.sire);
+    this.menuTokens = {};
     this.headless = options.headless !== false;
     this.consultaUrl = CONSULTA_URL;
     this.consultaReferer = CONSULTA_REFERER;
@@ -176,7 +213,9 @@ class SunatClient {
       this.context = null;
     }
 
-    const useStored = !forceLogin && freshState(this.statePath);
+    this.menuTokens = {};
+
+    const useStored = !this.sire && !forceLogin && freshState(this.statePath);
     const contextOptions = {
       locale: "es-PE",
       timezoneId: "America/Lima",
@@ -225,7 +264,11 @@ class SunatClient {
         // Tras el login, SUNAT ya nos deja en el menú. No se debe recargar
         // MenuInternet.htm porque se pierde el estado de la sesión y queda
         // una pantalla "Bienvenidos a SUNAT" en blanco.
-        await this.openModule(this.page, { navigate: false });
+        // Para SIRE/Consulta CPE no se abre el módulo de facturas: se trabaja
+        // desde el menú para obtener los tokens de cada servicio.
+        if (!this.sire) {
+          await this.openModule(this.page, { navigate: false });
+        }
         await this.saveState();
       } catch (error) {
         // No dejar una sesión guardada que pueda volver a romper el login.
@@ -654,6 +697,434 @@ class SunatClient {
     this.log(`No se detectó la URL del módulo; se usa ${this.consultaUrl}`);
   }
 
+  jsonHeaders(token) {
+    return {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    };
+  }
+
+  consultacpeHeaders(token) {
+    return {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json, text/plain, */*",
+      Origin: "https://e-factura.sunat.gob.pe",
+      Referer: "https://e-factura.sunat.gob.pe/",
+    };
+  }
+
+  async menuToken({ code, description, parent, match }) {
+    const page = this.page;
+    if (!page) throw new Error("No hay una página de SUNAT disponible.");
+
+    const atMenu = async () => {
+      if (/e-menu\.sunat\.gob\.pe/i.test(page.url())) return true;
+      await page
+        .goto(MENU_URLS[0], { waitUntil: "domcontentloaded", timeout: 60000 })
+        .catch(() => undefined);
+      await page.waitForTimeout(2500);
+      return /e-menu\.sunat\.gob\.pe/i.test(page.url());
+    };
+
+    if (!(await atMenu())) throw new Error("La sesión SOL expiró.");
+
+    const empresas = page
+      .locator(
+        "xpath=/html/body/div[5]/div[2]/div[1]/div/div[contains(normalize-space(.), 'Empresas')]",
+      )
+      .first();
+    if ((await empresas.count()) > 0) {
+      await empresas.click().catch(() => undefined);
+      await page.waitForTimeout(1200);
+    }
+
+    let hasEjecuta = await page
+      .evaluate(() => typeof window.ejecuta === "function")
+      .catch(() => false);
+
+    if (!hasEjecuta) {
+      await page
+        .goto(MENU_URLS[0], { waitUntil: "domcontentloaded", timeout: 60000 })
+        .catch(() => undefined);
+      await page.waitForTimeout(3000);
+      hasEjecuta = await page
+        .evaluate(() => typeof window.ejecuta === "function")
+        .catch(() => false);
+    }
+
+    if (!hasEjecuta) throw new Error("No se cargó el menú de SUNAT.");
+
+    await page.evaluate(
+      ({ code, description, parent }) => {
+        window.ejecuta(
+          `MenuInternet.htm?action=iconExecute&code=${code}`,
+          false,
+          description,
+          parent,
+          code,
+        );
+      },
+      { code, description, parent },
+    );
+
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      for (const frame of page.frames()) {
+        const url = frame.url();
+        if (!url.includes("token=") || !url.includes(match)) continue;
+        const tokenMatch = url.match(/[?&]token=([^&]+)/);
+        if (tokenMatch) return decodeURIComponent(tokenMatch[1]);
+      }
+
+      if (/loginMenuSol/i.test(page.url())) throw new Error("La sesión SOL expiró.");
+      await page.waitForTimeout(500);
+    }
+
+    throw new Error(`No se pudo obtener el token de SUNAT (${description}).`);
+  }
+
+  async consultacpeToken() {
+    if (this.menuTokens.consultacpe) return this.menuTokens.consultacpe;
+
+    const token = await this.menuToken({
+      code: "11.38.1.1.1",
+      description: "Nueva Consulta de comprobantes de pago",
+      parent: "#nivel1_11",
+      match: "consultacpe",
+    });
+
+    this.menuTokens.consultacpe = token;
+    return token;
+  }
+
+  sireDocType(tipo) {
+    const code = String(tipo);
+    if (code === "14") return "07";
+    if (code === "16") return "08";
+    return this.documento === "boleta" ? "03" : "01";
+  }
+
+  async consultarSire({ desde, hasta, tipo }) {
+    const [, mm, yyyy] = String(desde).split("/");
+    if (!mm || !yyyy) throw new Error("Fecha desde inválida para SIRE.");
+
+    const periodo = `${yyyy}${mm}`;
+    const docType = this.sireDocType(tipo);
+    const fechaIni = `${yyyy}-${mm}-01`;
+    const lastDay = new Date(Number(yyyy), Number(mm), 0).getDate();
+    const fechaFin = `${yyyy}-${mm}-${String(lastDay).padStart(2, "0")}`;
+
+    this.log(
+      `Consultando SIRE RCE (${tipoLabel(tipo, this.documento)}, periodo ${periodo})...`,
+    );
+
+    const token = await this.menuToken({
+      code: "60.2.2.1.1",
+      description: "Gestion de Compras",
+      parent: "#nivel1_60",
+      match: "gestionlibrocompras",
+    });
+
+    const text = await this.descargarPropuestaSire({
+      token,
+      periodo,
+      fechaIni,
+      fechaFin,
+      docType,
+    });
+
+    const invoices = this.parseSireTxt(text, docType);
+    this.log(`SIRE devolvió ${invoices.length} comprobante(s) para ${periodo}.`);
+    return invoices;
+  }
+
+  async descargarPropuestaSire({ token, periodo, fechaIni, fechaFin, docType }) {
+    const headers = this.jsonHeaders(token);
+    const exportUrl = `${SIRE_API}/rce/propuesta/web/propuesta/${periodo}/exportacioncomprobantepropuesta`;
+
+    const exportRes = await this.context.request.get(exportUrl, {
+      params: {
+        codTipoArchivo: "0",
+        codOrigenEnvio: "2",
+        fecEmisionIni: fechaIni,
+        fecEmisionFin: fechaFin,
+        codTipoCDP: docType,
+      },
+      headers,
+      timeout: 120000,
+    });
+
+    const exportText = await exportRes.text();
+    if (!exportRes.ok()) {
+      throw new Error(
+        `SIRE no pudo exportar la propuesta (${exportRes.status()}): ${exportText
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 200)}`,
+      );
+    }
+
+    let numTicket = "";
+    try {
+      numTicket = JSON.parse(exportText).numTicket;
+    } catch {
+      // Se informa abajo con el texto original.
+    }
+
+    if (!numTicket) {
+      throw new Error(`SIRE no devolvió un ticket de descarga. ${exportText.slice(0, 200)}`);
+    }
+
+    let reg = null;
+    let file = null;
+
+    for (let attempt = 0; attempt < 40; attempt++) {
+      await sleep(2000);
+
+      const statusRes = await this.context.request.get(
+        `${SIRE_API}/rvierce/gestionprocesosmasivos/web/masivo/consultaestadotickets`,
+        {
+          params: {
+            perIni: periodo,
+            perFin: periodo,
+            page: "1",
+            perPage: "20",
+            numTicket,
+          },
+          headers,
+          timeout: 120000,
+        },
+      );
+
+      const status = await statusRes.json().catch(() => null);
+      reg = status && Array.isArray(status.registros) ? status.registros[0] : null;
+
+      if (reg && Array.isArray(reg.archivoReporte) && reg.archivoReporte.length > 0) {
+        file = reg.archivoReporte[0];
+        break;
+      }
+
+      if (reg && /error|fall/i.test(String(reg.desEstadoProceso || ""))) {
+        throw new Error(`SIRE no pudo generar la propuesta: ${reg.desEstadoProceso}`);
+      }
+    }
+
+    if (!file) {
+      throw new Error("SIRE no generó la propuesta a tiempo. Intenta nuevamente.");
+    }
+
+    const downloadRes = await this.context.request.get(
+      `${SIRE_API}/rvierce/gestionprocesosmasivos/web/masivo/archivoreporte`,
+      {
+        params: {
+          nomArchivoReporte: file.nomArchivoReporte,
+          codTipoArchivoReporte:
+            file.codTipoAchivoReporte || file.codTipoArchivoReporte || "null",
+          codLibro: "080000",
+          perTributario: reg.perTributario || periodo,
+          codProceso: reg.codProceso,
+          numTicket: reg.numTicket || numTicket,
+        },
+        headers,
+        timeout: 120000,
+      },
+    );
+
+    const body = await downloadRes.body();
+    if (!downloadRes.ok() || body.subarray(0, 2).toString("latin1") !== "PK") {
+      throw new Error(
+        `SIRE no devolvió la propuesta (${downloadRes.status()}). ${body
+          .toString("utf8")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 200)}`,
+      );
+    }
+
+    const zip = new AdmZip(body);
+    const entry =
+      zip.getEntries().find((item) => /\.txt$/i.test(item.entryName)) ||
+      zip.getEntries()[0];
+
+    if (!entry) throw new Error("El ZIP de SIRE no contiene la propuesta.");
+
+    return entry.getData().toString("utf8");
+  }
+
+  parseSireTxt(text, docType) {
+    const clean = String(text || "").replace(/^\uFEFF/, "");
+    const lines = clean.split(/\r?\n/).filter((line) => line.trim() !== "");
+    if (lines.length < 2) return [];
+
+    const headers = lines[0].split("|").map((header) => header.trim());
+    const invoices = [];
+
+    for (const line of lines.slice(1)) {
+      const cols = line.split("|");
+      const row = {};
+      headers.forEach((header, index) => {
+        row[header] = cols[index] ?? "";
+      });
+
+      const rowType = sireValue(row, "Tipo CP/Doc.", "Tipo CP/Doc");
+      if (docType && rowType && rowType !== docType) continue;
+
+      const rucEmisor = sireValue(row, "Nro Doc Identidad");
+      const serie = sireValue(row, "Serie del CDP");
+      let numero = sireValue(
+        row,
+        "Nro CP o Doc. Nro Inicial (Rango)",
+        "Nro CP o Doc. Nro Inicial",
+      );
+
+      if (!rucEmisor || !serie || !numero) continue;
+      if (/^\d+$/.test(numero)) numero = String(Number(numero));
+
+      const tipo = rowType || docType;
+      const estadoRaw = sireValue(row, "Est. Comp.");
+      const estado =
+        estadoRaw === "1"
+          ? "Aceptado"
+          : estadoRaw === "0"
+            ? "No aceptado"
+            : estadoRaw || "Aceptado";
+
+      invoices.push({
+        id: `${tipo}|${serie}|${numero}|${rucEmisor}`,
+        tipo,
+        tipo_label: TIPO_LABELS[tipo] || tipo || "Comprobante",
+        serie,
+        numero,
+        numero_desc: `${serie} - ${numero}`,
+        fecha: sireValue(row, "Fecha de emisión", "Fecha de emision"),
+        ruc_emisor: rucEmisor,
+        emisor: sireValue(
+          row,
+          "Apellidos Nombres/ Razón Social",
+          "Apellidos Nombres/ Razon Social",
+        ),
+        ruc_receptor: sireValue(row, "RUC") || this.ruc,
+        receptor: sireValue(
+          row,
+          "Apellidos y Nombres o Razón social",
+          "Apellidos y Nombres o Razon social",
+        ),
+        total: toSireNumber(sireValue(row, "Total CP")),
+        moneda: sireValue(row, "Moneda"),
+        estado,
+        sire: true,
+        raw: row,
+      });
+    }
+
+    return invoices;
+  }
+
+  async descargarConsultacpe(invoice, suffix) {
+    if (!invoice.ruc_emisor || !invoice.tipo || !invoice.serie || !invoice.numero) {
+      throw new Error("Faltan datos del comprobante para consultarlo en SUNAT.");
+    }
+
+    let token = await this.consultacpeToken();
+    const numbers = [String(invoice.numero)];
+
+    if (/^\d+$/.test(String(invoice.numero))) {
+      const normalized = String(Number(invoice.numero));
+      if (normalized !== String(invoice.numero)) numbers.push(normalized);
+    }
+
+    let lastError = null;
+
+    for (const numero of numbers) {
+      const url = `${CONSULTACPE_API}/${invoice.ruc_emisor}-${invoice.tipo}-${invoice.serie}-${numero}-2${suffix}`;
+
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const response = await this.context.request.get(url, {
+          headers: this.consultacpeHeaders(token),
+          timeout: 120000,
+        });
+
+        if (response.ok()) {
+          const data = await response.json().catch(() => null);
+          if (!data || !data.valArchivo) {
+            throw new Error("SUNAT no devolvió el archivo del comprobante.");
+          }
+          return Buffer.from(data.valArchivo, "base64");
+        }
+
+        const body = await response.text();
+        const message = body
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 300);
+
+        if (response.status() === 401 && attempt === 0) {
+          this.menuTokens.consultacpe = null;
+          token = await this.consultacpeToken();
+          continue;
+        }
+
+        lastError = new Error(
+          message || `SUNAT respondió ${response.status()} al descargar el comprobante.`,
+        );
+
+        if (response.status() === 404 || response.status() === 400) break;
+        if (response.status() >= 500 || response.status() === 429) {
+          await sleep(5000 * (attempt + 1));
+          continue;
+        }
+        break;
+      }
+    }
+
+    throw lastError || new Error("No se pudo descargar el comprobante.");
+  }
+
+  async descargarSire(invoice, formato = "xml") {
+    return this.withRetry(async () => {
+      if (formato === "pdf") {
+        const zip = new AdmZip(await this.descargarConsultacpe(invoice, "/01"));
+        const entry = zip.getEntries().find((item) => /\.pdf$/i.test(item.entryName));
+        if (!entry) throw new Error("SUNAT no devolvió el PDF del comprobante.");
+        return { formato, content: entry.getData(), mime: "application/pdf" };
+      }
+
+      if (formato === "cdr") {
+        const zip = new AdmZip(await this.descargarConsultacpe(invoice, "/03"));
+        const entry = zip
+          .getEntries()
+          .find((item) => /^R-.*\.xml$/i.test(path.basename(item.entryName)));
+        if (!entry) throw new Error("SUNAT no devolvió el CDR del comprobante.");
+        return {
+          formato,
+          content: entry.getData(),
+          mime: "application/xml",
+          filename: path.basename(entry.entryName),
+        };
+      }
+
+      const zip = new AdmZip(await this.descargarConsultacpe(invoice, "/02"));
+      const entries = zip.getEntries().filter((item) => /\.xml$/i.test(item.entryName));
+      const cdrEntry = entries.find((item) => /^R-/i.test(path.basename(item.entryName)));
+      const xmlEntry = entries.find((item) => !/^R-/i.test(path.basename(item.entryName)));
+
+      if (!xmlEntry) throw new Error("El ZIP no contiene el XML del comprobante.");
+
+      return {
+        formato: "xml",
+        content: xmlEntry.getData(),
+        mime: "application/xml",
+        filename: path.basename(xmlEntry.entryName),
+        cdr: cdrEntry ? cdrEntry.getData().toString("utf8") : null,
+        cdrName: cdrEntry ? path.basename(cdrEntry.entryName) : null,
+      };
+    });
+  }
+
   async withRetry(operation) {
     try {
       return await operation();
@@ -667,16 +1138,24 @@ class SunatClient {
 
   async consultar({ desde, hasta, tipo = 10 }) {
     return this.withRetry(async () => {
+      if (this.sire) return this.consultarSire({ desde, hasta, tipo });
+
       this.log(`Consultando SUNAT (${this.documento}, tipo ${tipo}: ${tipoLabel(tipo, this.documento)})...`);
 
       const response = await this.context.request.get(this.consultaUrl, {
         params: {
           action: "realizarConsulta",
           buscarPor: "porPer",
-          estado: "1",
+          // El formulario de SUNAT envía estado=0 por defecto.
+          estado: "0",
           fec_desde: desde,
           fec_hasta: hasta,
           tipoConsulta: String(tipo),
+          // El formulario de SUNAT siempre envía el campo "RUC Emisor" (vacío
+          // si no se filtra). En "Facturas recibidas" el módulo lo lee aunque
+          // se consulte por periodo; si el parámetro no llega, responde con
+          // codeError 1.
+          ruc: "",
         },
         timeout: 90000,
         headers: {
@@ -710,13 +1189,30 @@ class SunatClient {
     }
 
     const outer = JSON.parse(decodeEntities(match[1]));
+    // SUNAT entrega el detalle del error en `messageError`; `message`/`msg` se
+    // mantienen como respaldo por compatibilidad.
+    const message = String(
+      outer.messageError || outer.message || outer.msg || "",
+    ).trim();
+    let data = outer.data;
+    if (typeof data === "string") {
+      try {
+        data = data.trim() ? JSON.parse(data) : null;
+      } catch {
+        data = null;
+      }
+    }
+
     if (Number(outer.codeError) !== 0) {
+      if (SIN_RESULTADOS_RE.test(message) || (Array.isArray(data) && data.length === 0)) {
+        return [];
+      }
+
       throw new Error(
-        outer.message || outer.msg || `SUNAT devolvió el código ${outer.codeError}.`,
+        message || `SUNAT devolvió el código ${outer.codeError}.`,
       );
     }
 
-    const data = typeof outer.data === "string" ? JSON.parse(outer.data) : outer.data;
     if (Array.isArray(data)) return data;
 
     if (data && typeof data === "object") {
@@ -830,6 +1326,8 @@ class SunatClient {
   }
 
   async descargar(invoice, formato = "xml") {
+    if (invoice.sire) return this.descargarSire(invoice, formato);
+
     if (formato === "pdf") {
       return { formato, content: await this.downloadPdf(invoice), mime: "application/pdf" };
     }
@@ -868,4 +1366,12 @@ class SunatClient {
   }
 }
 
-module.exports = { SunatClient, TIPOS, TIPO_LABELS, DOCUMENTOS, tipoLabel, normalizeInvoice };
+module.exports = {
+  SunatClient,
+  TIPOS,
+  TIPO_LABELS,
+  DOCUMENTOS,
+  TIPOS_RECIBIDOS,
+  tipoLabel,
+  normalizeInvoice,
+};

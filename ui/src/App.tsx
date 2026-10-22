@@ -146,7 +146,6 @@ interface Prefs {
   tipo?: string;
   pdf?: boolean;
   solo?: boolean;
-  visible?: boolean;
   max?: string;
 }
 
@@ -253,7 +252,7 @@ export default function App() {
   const [range, setRange] = useState<DateRange>(initialRange);
   const [downloadPdf, setDownloadPdf] = useState(prefs.pdf !== false);
   const [soloListar, setSoloListar] = useState(Boolean(prefs.solo));
-  const [visible, setVisible] = useState(prefs.visible !== false);
+  const [visible, setVisible] = useState(false);
   const [max, setMax] = useState(prefs.max ?? "");
 
   const [documentos, setDocumentos] = useState<Record<string, string>>({
@@ -262,6 +261,12 @@ export default function App() {
   });
   const [tipos, setTipos] = useState<Record<string, string>>({
     "10": "Facturas emitidas",
+    "11": "Facturas recibidas",
+    "12": "Facturas rechazadas",
+    "13": "Notas de crédito emitidas",
+    "14": "Notas de crédito recibidas",
+    "15": "Notas de débito emitidas",
+    "16": "Notas de débito recibidas",
   });
 
   const [job, setJob] = useState<Job | null>(null);
@@ -292,7 +297,6 @@ export default function App() {
       .then((config) => {
         setRuc((current) => current || config.ruc || "");
         setUser((current) => current || config.user || "");
-        if (config.headless === false) setVisible(true);
       })
       .catch(() => undefined);
 
@@ -403,7 +407,6 @@ export default function App() {
         tipo: payload.tipo,
         pdf: payload.descargarPdf,
         solo: payload.soloListar,
-        visible: payload.visible,
         max: max || undefined,
       }),
     );
@@ -608,6 +611,12 @@ export default function App() {
                 <Field label="Periodo">
                   <DateRangePicker value={range} onChange={setRange} className="h-10" />
                 </Field>
+
+                {["11", "14", "16"].includes(tipo) && (
+                  <p className="text-xs text-muted-foreground md:col-span-3">
+                    Recibidas: se consultan por SIRE RCE y el periodo debe ser un solo mes.
+                  </p>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-x-6 gap-y-3 border-t border-dashed pt-4">

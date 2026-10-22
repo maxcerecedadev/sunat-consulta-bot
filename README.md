@@ -2,7 +2,7 @@
 
 Herramienta local para **listar comprobantes ya emitidos o recibidos** desde el portal de SUNAT (SOL) y descargar su **XML, PDF y CDR** cuando SUNAT lo entrega. También extrae el **detalle por ítem** desde el XML.
 
-No usa la API oficial de SUNAT (no existe una que devuelva el detalle histórico): automatiza con Playwright el mismo módulo **Consulta de Comprobante de Pago** que se usa manualmente, pero por rango de fechas.
+Para **facturas/boletas emitidas y rechazadas** automatiza con Playwright el módulo **SEE - SOL**. Para **comprobantes recibidos** usa las APIs oficiales de **SIRE RCE** (listado del periodo) y **Consulta de Comprobante de Pago** (XML, PDF y CDR), autenticándose con el token que genera el menú SOL. No requiere crear credenciales de API SUNAT.
 
 ## Requisitos
 
@@ -43,6 +43,8 @@ pnpm run ui
 Compila la UI (React + shadcn/ui) y abre `http://127.0.0.1:3131` en el navegador. Desde ahí puedes ingresar RUC, usuario y clave SOL, elegir el periodo con un calendario shadcn, el documento (facturas/boletas), el tipo, ver el progreso, revisar el detalle por ítem y descargar XML/PDF/CDR. El servidor escucha solo en `127.0.0.1`.
 
 Variables opcionales: `UI_PORT` (default `3131`) y `UI_OPEN=false` para no abrir el navegador automáticamente.
+
+La UI inicia con Chromium oculto. Si SUNAT pide captcha, marca **Mostrar navegador** antes de consultar.
 
 Si modificas la UI puedes recompilar con `npm run build:ui`. Para desarrollo con recarga en caliente usa `npm run dev:ui` (y el API en otra terminal con `node src/server.js`).
 
@@ -89,7 +91,8 @@ npm run consulta -- \
 | `--sin-xml` | No guardar XML (igual descarga para leer el detalle) |
 | `--solo-listar` | Solo lista; no descarga ni parsea |
 | `--max` | Procesar como máximo N comprobantes (útil para probar) |
-| `--visible` | Muestra el navegador (útil si SUNAT pide captcha) |
+| `--visible` | Fuerza el navegador visible (útil si SUNAT pide captcha) |
+| `--headless` | Fuerza el navegador oculto (default) |
 | `--doctor` | Diagnóstico de instalación |
 | `--help` | Ayuda |
 
@@ -111,14 +114,13 @@ El JSON es el más completo: incluye emisor, cliente, totales, ítems y rutas de
 ## Cómo funciona
 
 1. Inicia sesión en `api-seguridad.sunat.gob.pe` con RUC + usuario + clave SOL.
-2. Navega el menú SOL hasta:
-   - **Empresas → Comprobantes de pago → SEE - SOL → Factura Electrónica → Consultar Factura y Nota** (facturas), o
-   - **Empresas → Comprobantes de pago → SEE - SOL → Boleta de Venta Electrónica → Consultar Boleta de Venta y Nota** (boletas).
-3. Detecta la URL real del módulo desde el iframe (facturas y boletas usan endpoints distintos) y consulta por rango de fechas y tipo.
-4. Descarga el XML de cada comprobante y extrae el detalle UBL 2.1.
-5. Descarga el PDF y guarda todo en la carpeta de salida.
+2. Según el tipo de consulta:
+   - **Emitidas/rechazadas**: navega el menú SOL hasta **Empresas → Comprobantes de pago → SEE - SOL → Factura Electrónica → Consultar Factura y Nota** (facturas) o **Boleta de Venta Electrónica → Consultar Boleta de Venta y Nota** (boletas), detecta la URL real del iframe y consulta por rango de fechas.
+   - **Recibidas (11/14/16)**: obtiene el token del menú SOL para **SIRE RCE**, descarga la propuesta del mes y la usa como lista de comprobantes. Luego consulta cada uno en **Consulta de Comprobante de Pago** y baja XML, PDF y CDR.
+3. Extrae el detalle UBL 2.1 desde el XML de cada comprobante.
+4. Guarda todo en la carpeta de salida. Las recibidas se procesan con concurrencia configurable (`SUNAT_CONCURRENCY`, default 3) porque SUNAT tarda ~10 s por archivo.
 
-La sesión se reutiliza durante 10 minutos en `.session/<RUC>.json` para no iniciar sesión por cada archivo.
+La sesión se reutiliza durante 10 minutos en `.session/<RUC>.json` para no iniciar sesión por cada archivo (las consultas a recibidas hacen login limpio).
 
 ## Notas y limitaciones
 
@@ -126,7 +128,9 @@ La sesión se reutiliza durante 10 minutos en `.session/<RUC>.json` para no inic
 - SUNAT puede pedir **captcha** o bloquear intentos repetidos. Usa `--visible` para resolverlo manualmente.
 - El **CDR** solo se guarda si viene dentro del ZIP que entrega el módulo. Si no viene, no hay forma de recuperarlo retroactivamente desde SUNAT.
 - El detalle por ítem sale del **XML**; el listado del portal no lo incluye.
-- Procesa los comprobantes de forma secuencial para no saturar el portal.
+- Las **recibidas** se consultan por mes (SIRE RCE); no se puede pedir un rango de varios meses en una sola consulta.
+- Las recibidas se procesan en paralelo (`SUNAT_CONCURRENCY`, default 3) porque SUNAT tarda ~10 s por archivo. Bájalo si SUNAT responde con errores.
+- Las emitidas se procesan de forma secuencial para no saturar el portal.
 - No compartas `.env` ni `.session/`: contienen credenciales o cookies de tu cuenta.
 
 ## Seguridad

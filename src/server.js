@@ -13,6 +13,7 @@ const {
   TIPOS,
   TIPO_LABELS,
   DOCUMENTOS,
+  TIPOS_RECIBIDOS,
   tipoLabel,
 } = require("./sunat-client");
 const { parseUbl } = require("./ubl");
@@ -52,7 +53,7 @@ app.get("/api/config", (_req, res) => {
   res.json({
     ruc: process.env.SUNAT_RUC || "",
     user: process.env.SUNAT_USER || "",
-    headless: process.env.SUNAT_HEADLESS === "true",
+    headless: process.env.SUNAT_HEADLESS !== "false",
   });
 });
 
@@ -78,6 +79,13 @@ app.post("/api/consulta", (req, res) => {
       throw new Error("La fecha inicial no puede ser mayor que la final.");
     }
 
+    const sire = TIPOS_RECIBIDOS.has(tipo);
+    if (sire && desde.iso.slice(0, 7) !== hasta.iso.slice(0, 7)) {
+      throw new Error(
+        "Para comprobantes recibidos selecciona un solo mes: se consultan desde el SIRE (RCE).",
+      );
+    }
+
     const max = body.max ? Number(body.max) : null;
     if (max !== null && (!Number.isFinite(max) || max < 1)) {
       throw new Error("El máximo debe ser un número mayor a cero.");
@@ -91,13 +99,14 @@ app.post("/api/consulta", (req, res) => {
       hasta,
       tipo,
       documento,
+      sire,
       soloListar,
       descargarXml: !soloListar && body.descargarXml !== false,
       descargarPdf: !soloListar && body.descargarPdf !== false,
       headless:
         typeof body.visible === "boolean"
           ? !body.visible
-          : process.env.SUNAT_HEADLESS === "true",
+          : process.env.SUNAT_HEADLESS !== "false",
       max,
     };
 
@@ -128,6 +137,7 @@ app.post("/api/consulta", (req, res) => {
         user,
         tipo,
         documento,
+        sire,
         desde: desde.iso,
         hasta: hasta.iso,
         soloListar,
@@ -297,6 +307,7 @@ async function runJob(job, credentials, options) {
     solUser: credentials.user,
     solPassword: credentials.password,
     documento: credentials.documento,
+    sire: options.sire,
     headless: options.headless,
     statePath: path.join(DATA_DIR, ".session", `${credentials.ruc}.json`),
     log: (message) => {
@@ -335,10 +346,7 @@ async function runJob(job, credentials, options) {
 
     job.status = "processing";
 
-    for (let index = 0; index < invoices.length; index++) {
-      if (job.cancelled) break;
-
-      const invoice = invoices[index];
+    const processInvoice = async (invoice) => {
       const record = {
         id: invoice.id,
         tipo: invoice.tipo,
@@ -360,6 +368,8 @@ async function runJob(job, credentials, options) {
       };
 
       if (!options.soloListar) {
+        if (options.sire) client.log(`Descargando ${invoice.numero_desc}...`);
+
         try {
           const xml = await client.descargar(invoice, "xml");
           const base = safeName(invoice);
@@ -413,10 +423,28 @@ async function runJob(job, credentials, options) {
         }
       }
 
-      job.invoices.push(record);
-      job.processed = index + 1;
-      job.message = `${job.processed} de ${job.total} comprobante(s) procesado(s)...`;
-      await sleep(300);
+      return record;
+    };
+
+    // SIRE/consultacpe responde lento (~10 s por archivo); se procesan varios
+    // comprobantes en paralelo para que 100 compras no tarden una hora.
+    const concurrency = options.sire
+      ? Math.min(Math.max(Number(process.env.SUNAT_CONCURRENCY || 3), 1), 5)
+      : 1;
+
+    for (let index = 0; index < invoices.length; index += concurrency) {
+      if (job.cancelled) break;
+
+      const chunk = invoices.slice(index, index + concurrency);
+      const records = await Promise.all(chunk.map((invoice) => processInvoice(invoice)));
+
+      for (const record of records) {
+        job.invoices.push(record);
+        job.processed = job.invoices.length;
+        job.message = `${job.processed} de ${job.total} comprobante(s) procesado(s)...`;
+      }
+
+      await sleep(options.sire ? 800 : 300);
     }
 
     job.status = job.cancelled ? "cancelled" : "done";

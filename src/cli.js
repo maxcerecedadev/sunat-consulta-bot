@@ -8,7 +8,13 @@ const path = require("path");
 const { parseArgs } = require("util");
 const prompts = require("prompts");
 const { chromium } = require("playwright");
-const { SunatClient, TIPOS, DOCUMENTOS, tipoLabel } = require("./sunat-client");
+const {
+  SunatClient,
+  TIPOS,
+  TIPOS_RECIBIDOS,
+  DOCUMENTOS,
+  tipoLabel,
+} = require("./sunat-client");
 const { parseUbl } = require("./ubl");
 const {
   writeJson,
@@ -40,13 +46,14 @@ Opciones:
   --documento   factura | boleta (default: factura)
   --tipo        Código de consulta: 10 emitidas, 11 recibidas,
                 12 rechazadas, 13/14 notas de crédito, 15/16 notas de débito
+                (11/14/16 usan SIRE RCE y requieren un solo mes)
   --salida      Carpeta de salida (default: ./output/<fecha>_tipo<código>)
   --sin-pdf     No descargar PDF
   --sin-xml     No descargar XML (solo listado)
   --solo-listar No descargar archivos ni detalle
   --max         Máximo de comprobantes a procesar (útil para probar)
-  --visible     Mostrar el navegador (default)
-  --headless    Ocultar el navegador
+  --visible     Forzar navegador visible (útil si SUNAT pide captcha)
+  --headless    Forzar navegador oculto (default)
   --doctor      Diagnóstico de instalación
   --help        Muestra esta ayuda
 
@@ -168,6 +175,13 @@ async function gatherOptions(values) {
     fail("La fecha inicial no puede ser mayor que la final.");
   }
 
+  if (
+    TIPOS_RECIBIDOS.has(tipo) &&
+    desdeParsed.iso.slice(0, 7) !== hastaParsed.iso.slice(0, 7)
+  ) {
+    fail("Para comprobantes recibidos selecciona un solo mes: se consultan desde el SIRE (RCE).");
+  }
+
   return {
     ruc: String(ruc).trim(),
     user: String(user).trim(),
@@ -191,7 +205,7 @@ async function gatherOptions(values) {
       ? true
       : values.visible
         ? false
-        : process.env.SUNAT_HEADLESS === "true",
+        : process.env.SUNAT_HEADLESS !== "false",
   };
 }
 
@@ -212,6 +226,7 @@ async function run(values) {
     solUser: options.user,
     solPassword: options.password,
     documento: options.documento,
+    sire: TIPOS_RECIBIDOS.has(options.tipo),
     headless: options.headless,
     statePath: path.join(process.cwd(), ".session", `${options.ruc}.json`),
     log: (message) => console.error(message),
