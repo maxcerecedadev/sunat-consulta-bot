@@ -507,20 +507,6 @@ export default function App() {
     setCancelling(false);
   };
 
-  const openHistory = async (id: string) => {
-    setError("");
-    try {
-      const response = await fetch(`/api/jobs/${encodeURIComponent(id)}`);
-      if (!response.ok) throw new Error("No se pudo cargar la consulta del historial.");
-      const data: Job = await response.json();
-      setJob(data);
-      setJobId(data.id);
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    } catch (error) {
-      setError(error instanceof Error ? error.message : "Error al cargar el historial.");
-    }
-  };
-
   const historyTypeLabel = (item: HistoryItem) => {
     const code = item.options?.tipo || "10";
     const label = tipos[code] || code;
@@ -757,7 +743,7 @@ export default function App() {
                     <TableHead>Periodo</TableHead>
                     <TableHead>Comprobantes</TableHead>
                     <TableHead>Estado</TableHead>
-                    <TableHead className="text-right">Acciones</TableHead>
+                    <TableHead className="text-center">Acciones</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -786,14 +772,7 @@ export default function App() {
                         </Badge>
                       </TableCell>
                       <TableCell>
-                        <div className="flex justify-end gap-2">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => openHistory(item.id)}
-                          >
-                            Ver
-                          </Button>
+                        <div className="flex justify-center gap-2">
                           {item.hasOutput && (
                             <Button asChild variant="outline" size="sm">
                               <a href={`/api/jobs/${item.id}/zip`} download>
