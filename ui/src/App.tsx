@@ -11,6 +11,7 @@ import {
   Loader2,
   RefreshCcw,
   Search,
+  Trash2,
 } from "lucide-react";
 
 import { DateRangePicker, type DateRange } from "@/components/date-range-picker";
@@ -27,6 +28,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -275,21 +277,64 @@ export default function App() {
   const [cancelling, setCancelling] = useState(false);
   const [detailRecord, setDetailRecord] = useState<Invoice | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyTotalPages, setHistoryTotalPages] = useState(1);
+  const [deleteTarget, setDeleteTarget] = useState<HistoryItem | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
-  const loadHistory = useCallback(async () => {
+  const loadHistory = useCallback(async (page = 1) => {
     try {
-      const response = await fetch("/api/history?limit=20");
+      const response = await fetch(`/api/history?page=${page}&pageSize=20`);
       if (!response.ok) return;
-      const data: HistoryItem[] = await response.json();
-      setHistory(data);
+      const data: {
+        items: HistoryItem[];
+        total: number;
+        page: number;
+        pageSize: number;
+        totalPages: number;
+      } = await response.json();
+      setHistory(data.items);
+      setHistoryPage(data.page);
+      setHistoryTotal(data.total);
+      setHistoryTotalPages(data.totalPages);
     } catch {
       // El historial es opcional.
     }
   }, []);
 
   useEffect(() => {
-    void loadHistory();
+    void loadHistory(1);
   }, [loadHistory]);
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(deleteTarget.id)}`, {
+        method: "DELETE",
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || "No se pudo eliminar la consulta.");
+      }
+
+      if (job?.id === deleteTarget.id) {
+        setJob(null);
+        setJobId(null);
+      }
+
+      setDeleteTarget(null);
+      await loadHistory(historyPage);
+    } catch (deleteError) {
+      setError(
+        deleteError instanceof Error ? deleteError.message : "No se pudo eliminar la consulta.",
+      );
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   useEffect(() => {
     fetch("/api/config")
@@ -330,7 +375,7 @@ export default function App() {
           if (data.status === "error") {
             setError(data.error || "La consulta terminó con error.");
           }
-          void loadHistory();
+          void loadHistory(1);
         }
       } catch (pollError) {
         if (!active) return;
@@ -699,7 +744,7 @@ export default function App() {
             <CardHeader className="border-b">
               <CardTitle>Historial</CardTitle>
               <CardDescription>
-                Consultas guardadas en este equipo. Puedes abrirlas o descargar todo su contenido.
+                Consultas guardadas en este equipo. Puedes abrirlas, descargarlas o eliminarlas.
               </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
@@ -756,12 +801,47 @@ export default function App() {
                               </a>
                             </Button>
                           )}
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setDeleteTarget(item)}
+                            aria-label="Eliminar consulta"
+                            className="text-destructive hover:text-destructive"
+                          >
+                            <Trash2 className="size-4" />
+                          </Button>
                         </div>
                       </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t px-4 py-3 text-sm">
+                <span className="text-muted-foreground">
+                  {historyTotal} consulta(s)
+                </span>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={historyPage <= 1}
+                    onClick={() => void loadHistory(historyPage - 1)}
+                  >
+                    Anterior
+                  </Button>
+                  <span className="text-muted-foreground">
+                    Página {historyPage} de {historyTotalPages}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={historyPage >= historyTotalPages}
+                    onClick={() => void loadHistory(historyPage + 1)}
+                  >
+                    Siguiente
+                  </Button>
+                </div>
+              </div>
             </CardContent>
           </Card>
         )}
@@ -781,6 +861,45 @@ export default function App() {
             </DialogDescription>
           </DialogHeader>
           {detailRecord && <DetailBody record={detailRecord} jobId={job?.id || jobId || ""} />}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setDeleteTarget(null);
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Eliminar consulta</DialogTitle>
+            <DialogDescription>
+              ¿Eliminar la consulta del{" "}
+              {deleteTarget
+                ? new Date(deleteTarget.createdAt).toLocaleString("es-PE", {
+                    dateStyle: "short",
+                    timeStyle: "short",
+                  })
+                : ""}
+              ? Se borrarán el XML, PDF y CDR descargados. Esta acción no se puede deshacer.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteTarget(null)}
+              disabled={deleting}
+            >
+              Cancelar
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void confirmDelete()}
+              disabled={deleting}
+            >
+              {deleting ? "Eliminando..." : "Eliminar"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

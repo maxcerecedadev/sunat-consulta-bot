@@ -162,25 +162,34 @@ app.post("/api/consulta", (req, res) => {
 });
 
 app.get("/api/history", (req, res) => {
-  const limit = Math.min(Number(req.query.limit) || 20, 100);
+  const pageSize = Math.min(
+    Math.max(Number(req.query.pageSize || req.query.limit || 20), 1),
+    100,
+  );
+  const requestedPage = Math.max(Number(req.query.page) || 1, 1);
 
-  const list = [...jobs.values()]
-    .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
-    .slice(0, limit)
-    .map((job) => ({
-      id: job.id,
-      createdAt: job.createdAt,
-      status: job.status,
-      message: job.message,
-      total: job.total,
-      processed: job.processed,
-      options: job.options,
-      hasOutput:
-        job.hasOutput ??
-        fs.existsSync(path.join(job.outputDir || "", "comprobantes.csv")),
-    }));
+  const all = [...jobs.values()].sort(
+    (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0),
+  );
+  const total = all.length;
+  const totalPages = Math.max(Math.ceil(total / pageSize), 1);
+  const page = Math.min(requestedPage, totalPages);
+  const start = (page - 1) * pageSize;
 
-  res.json(list);
+  const items = all.slice(start, start + pageSize).map((job) => ({
+    id: job.id,
+    createdAt: job.createdAt,
+    status: job.status,
+    message: job.message,
+    total: job.total,
+    processed: job.processed,
+    options: job.options,
+    hasOutput:
+      job.hasOutput ??
+      fs.existsSync(path.join(job.outputDir || "", "comprobantes.csv")),
+  }));
+
+  res.json({ items, total, page, pageSize, totalPages });
 });
 
 app.get("/api/jobs/:id/zip", (req, res) => {
@@ -229,6 +238,34 @@ app.get("/api/jobs/:id", (req, res) => {
     createdAt: job.createdAt,
     hasOutput: fs.existsSync(path.join(job.outputDir, "comprobantes.csv")),
   });
+});
+
+app.delete("/api/jobs/:id", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: "Consulta no encontrada." });
+
+  if (["queued", "login", "listing", "processing"].includes(job.status)) {
+    return res.status(409).json({
+      error: "No se puede eliminar una consulta en curso. Cancélala primero.",
+    });
+  }
+
+  const client = clients.get(job.id);
+  if (client) client.close().catch(() => undefined);
+  clients.delete(job.id);
+  jobs.delete(job.id);
+
+  if (job.outputDir) {
+    const root = path.resolve(OUTPUT_ROOT);
+    const dir = path.resolve(job.outputDir);
+    const relative = path.relative(root, dir);
+
+    if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  res.json({ ok: true });
 });
 
 app.post("/api/jobs/:id/cancel", (req, res) => {
@@ -619,7 +656,7 @@ function loadHistory() {
 
   entries
     .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
-    .slice(0, 100)
+    .slice(0, 500)
     .forEach((entry) => jobs.set(entry.id, entry));
 }
 
