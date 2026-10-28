@@ -2,7 +2,9 @@
 
 Herramienta local para **listar comprobantes ya emitidos o recibidos** desde el portal de SUNAT (SOL) y descargar su **XML, PDF y CDR** cuando SUNAT lo entrega. También extrae el **detalle por ítem** desde el XML.
 
-Para **facturas/boletas emitidas y rechazadas** automatiza con Playwright el módulo **SEE - SOL**. Para **comprobantes recibidos** usa las APIs oficiales de **SIRE RCE** (listado del periodo) y **Consulta de Comprobante de Pago** (XML, PDF y CDR), autenticándose con el token que genera el menú SOL. No requiere crear credenciales de API SUNAT.
+Incluye un módulo **multiempresa** para revisar el **Buzón SOL (Notificaciones y Mensajes)** y dejar cada aviso listo para enviar por **WhatsApp** (enlace `wa.me`) o enviarlo automáticamente por WhatsApp Web con Baileys.
+
+Para **facturas/boletas emitidas y rechazadas** automatiza con Playwright el módulo **SEE - SOL**. Para **comprobantes recibidos** usa la API de **SIRE RCE** (listado del periodo) y el endpoint interno de **Consulta de Comprobante de Pago** (XML, PDF y CDR) que consume el portal de SUNAT, autenticándose con el token que genera el menú SOL. No requiere crear credenciales de API SUNAT ni usa la API pública de consulta (`validarcomprobante`).
 
 ## Requisitos
 
@@ -96,6 +98,52 @@ npm run consulta -- \
 | `--doctor` | Diagnóstico de instalación |
 | `--help` | Ayuda |
 
+## Buzón SOL y WhatsApp (multiempresa)
+
+La pestaña **Buzón SOL** de la interfaz permite registrar varias empresas (RUC, usuario SOL, clave y número de WhatsApp), revisar sus notificaciones y mensajes, y preparar el mensaje para WhatsApp.
+
+Características:
+
+- **Solo metadatos por defecto**: asunto, tipo, fecha, urgencia y cantidad de adjuntos. No abre el detalle, por lo que SUNAT **no marca los mensajes como leídos**.
+- **Descarga opcional de adjuntos**: con el check **“Descargar adjuntos y marcar como leído”**, el bot abre el detalle (SUNAT lo marca como leído de forma irreversible), descarga los PDFs y los guarda en `buzon/attachments/`.
+- **Multiempresa**: cada empresa tiene su propio RUC, credenciales, WhatsApp y revisión independiente.
+- **Mensaje listo para enviar**: abre `wa.me` con el texto ya escrito, o cópialo. También puede marcar el aviso como enviado.
+- **Envío automático opcional** por WhatsApp Web (Baileys) escaneando un QR desde la UI. Si los adjuntos están descargados, se envían como archivos junto al texto.
+- **Línea base**: la primera revisión no envía nada; solo guarda el estado para detectar novedades desde la segunda revisión.
+- **Scheduler opcional**: `BUZON_AUTO=true` revisa las empresas activas cada `BUZON_INTERVAL_MIN` minutos (default 15).
+
+### Cómo usarlo
+
+1. `npm run ui` y abre la pestaña **Buzón SOL**.
+2. **Agregar empresa** con RUC, usuario SOL, clave SOL y WhatsApp con código de país (ej. `51987654321`).
+3. Pulsa **Revisar todas** (o el botón de una empresa). La primera vez crea la línea base. Si SUNAT pide captcha, marca **Mostrar navegador**. Si quieres los PDFs adjuntos, edita la empresa y marca **Descargar adjuntos y marcar como leído** (la opción queda guardada por empresa).
+4. En cada novedad pulsa **Preparar** para abrir el mensaje listo, copiarlo o abrir WhatsApp. Si hay adjuntos descargados, aparecen como enlaces y se envían por WhatsApp Web junto al texto.
+5. Para envío automático, en el panel **WhatsApp** pulsa **Conectar WhatsApp** y escanea el QR desde *WhatsApp → Dispositivos vinculados*.
+
+También puedes ejecutarlo sin la UI:
+
+```bash
+# Revisar todas las empresas activas y mostrar novedades
+npm run buzon -- --all
+
+# Revisar una empresa y enviar las novedades por WhatsApp Web
+npm run buzon -- --empresa 20123456789 --enviar
+
+# Revisar cada 15 minutos (cron interno)
+npm run buzon:watch -- --all --enviar --interval 15
+```
+
+### Advertencia sobre WhatsApp
+
+El envío automático usa **WhatsApp Web (Baileys)**, que **no es un canal oficial**. WhatsApp puede **bloquear el número** si detecta envíos masivos o no solicitados. Úsalo con moderación y solo para números que hayan dado su consentimiento. Para producción, usa la API oficial de WhatsApp Cloud o el modo de mensaje listo para enviar manualmente.
+
+### Datos y seguridad
+
+- `empresas.json` guarda las empresas con la clave SOL **cifrada** (AES-256-GCM) y permisos `0600`. La clave local `.buzon.key` se genera sola; puedes usar `SUNAT_MASTER_KEY` para tu propia clave maestra.
+- El estado de avistamientos y lo enviado queda en `buzon/state.json`; la sesión de WhatsApp en `whatsapp-auth/`.
+- `empresas.json`, `.buzon.key`, `whatsapp-auth/` y `buzon/` están en `.gitignore`.
+- El servidor sigue escuchando solo en `127.0.0.1`.
+
 ## Salida
 
 ```text
@@ -124,9 +172,11 @@ La sesión se reutiliza durante 10 minutos en `.session/<RUC>.json` para no inic
 
 ## Notas y limitaciones
 
-- **No es una API oficial**: SUNAT puede cambiar el portal o los selectores. Si eso pasa, habrá que actualizar los XPath del menú.
+- **No es una API pública documentada**: usa el portal (Playwright) para emitidas y, para recibidas, la API de SIRE RCE (documentada) más el endpoint interno `consultacpe`, que no está documentado públicamente. SUNAT puede cambiar el portal, los selectores o `consultacpe` sin aviso. Si eso pasa, habrá que actualizar los XPath del menú o el flujo correspondiente.
+- El **Buzón SOL** usa el visor interno `ww1.sunat.gob.pe/ol-ti-itvisornoti/visor`, que tampoco es una API documentada. Por defecto se consultan solo metadatos para no marcar los mensajes como leídos. Si habilitas **Descargar adjuntos y marcar como leído**, se abre el detalle y SUNAT lo marca como leído de forma irreversible.
+- En algunos mensajes el visor legacy devuelve el mismo `codArchivo` para varios PDFs y entrega el mismo archivo. En ese caso el bot descarga el que SUNAT expone y avisa en la app que no pudo bajar el resto.
 - SUNAT puede pedir **captcha** o bloquear intentos repetidos. Usa `--visible` para resolverlo manualmente.
-- El **CDR** solo se guarda si viene dentro del ZIP que entrega el módulo. Si no viene, no hay forma de recuperarlo retroactivamente desde SUNAT.
+- En **emitidas**, el **CDR** solo se guarda si viene dentro del ZIP que entrega el módulo. En **recibidas** se intenta descargar por separado (`/03`). Si SUNAT no lo tiene, no hay forma de recuperarlo retroactivamente.
 - El detalle por ítem sale del **XML**; el listado del portal no lo incluye.
 - Las **recibidas** se consultan por mes (SIRE RCE); no se puede pedir un rango de varios meses en una sola consulta.
 - Las recibidas se procesan en paralelo (`SUNAT_CONCURRENCY`, default 2) porque SUNAT tarda ~10 s por archivo. Si SUNAT responde con error 500, el bot reintenta los fallidos al final; puedes bajar la concurrencia a 1.

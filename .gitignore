@@ -6,3 +6,7 @@ ui-dist/
 *.log
 dist-electron/
 playwright-browsers/
+empresas.json
+.buzon.key
+whatsapp-auth/
+buzon/

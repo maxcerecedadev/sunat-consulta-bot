@@ -3,6 +3,7 @@ import { format } from "date-fns";
 import { es } from "date-fns/locale";
 import {
   AlertCircle,
+  Bell,
   CloudDownload,
   Eye,
   EyeOff,
@@ -15,6 +16,7 @@ import {
 } from "lucide-react";
 
 import packageInfo from "../../package.json";
+import BuzonApp from "./BuzonApp";
 
 import { DateRangePicker, type DateRange } from "@/components/date-range-picker";
 import { Badge } from "@/components/ui/badge";
@@ -237,6 +239,7 @@ function progressPercent(job: Job): number {
 }
 
 export default function App() {
+  const [view, setView] = useState<"comprobantes" | "buzon">("comprobantes");
   const prefs = useMemo(readPrefs, []);
   const initialRange = useMemo(() => {
     const from = parseLocalDate(prefs.desde);
@@ -544,16 +547,35 @@ export default function App() {
             <div>
               <h1 className="text-lg font-semibold tracking-tight">Consulta SUNAT</h1>
               <p className="text-xs text-muted-foreground">
-                Comprobantes emitidos y recibidos con detalle
+                Comprobantes, Buzón SOL y WhatsApp
               </p>
             </div>
           </div>
+          <nav className="flex items-center gap-1 rounded-xl border border-border/70 bg-muted/40 p-1">
+            <Button
+              variant={view === "comprobantes" ? "default" : "ghost"}
+              size="sm"
+              onClick={() => setView("comprobantes")}
+            >
+              <CloudDownload className="size-4" />
+              Comprobantes
+            </Button>
+            <Button
+              variant={view === "buzon" ? "default" : "ghost"}
+              size="sm"
+              onClick={() => setView("buzon")}
+            >
+              <Bell className="size-4" />
+              Buzón SOL
+            </Button>
+          </nav>
           <Badge variant="outline" className="border-border/70 bg-muted/40 text-muted-foreground">
             v{packageInfo.version}
           </Badge>
         </div>
       </header>
 
+      {view === "comprobantes" ? (
       <main className="mx-auto grid max-w-6xl gap-6 px-6 py-8">
         <Card>
           <CardHeader>
@@ -827,6 +849,11 @@ export default function App() {
           </Card>
         )}
       </main>
+      ) : (
+        <main className="mx-auto grid max-w-6xl gap-6 px-6 py-8">
+          <BuzonApp />
+        </main>
+      )}
 
       <Dialog open={Boolean(detailRecord)} onOpenChange={(open) => !open && setDetailRecord(null)}>
         <DialogContent className="max-h-[88vh] max-w-4xl overflow-y-auto">

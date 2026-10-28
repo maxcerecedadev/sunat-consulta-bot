@@ -3,6 +3,8 @@ allowBuilds:
   electron: true
   electron-winstaller: true
   "@parcel/watcher": true
+  '@whiskeysockets/baileys': false
+  protobufjs: false
 minimumReleaseAgeExclude:
   - electron@44.9.3
 onlyBuiltDependencies:
@@ -10,3 +12,4 @@ onlyBuiltDependencies:
   - electron
   - electron-winstaller
   - "@parcel/watcher"
+blockExoticSubdeps: false
