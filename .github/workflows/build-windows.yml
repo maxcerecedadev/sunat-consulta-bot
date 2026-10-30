@@ -45,6 +45,7 @@ jobs:
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: consulta-sunat-windows
           path: |
