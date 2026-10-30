@@ -103,6 +103,26 @@ function normalizeKey(value) {
     .toLowerCase();
 }
 
+function menuTextRegex(label) {
+  const words = String(label)
+    .replace(/\s*[-–]\s*/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) =>
+      word
+        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        .replace(/[áÁ]/g, "[áa]")
+        .replace(/[éÉ]/g, "[ée]")
+        .replace(/[íÍ]/g, "[íi]")
+        .replace(/[óÓ]/g, "[óo]")
+        .replace(/[úÚ]/g, "[úu]")
+        .replace(/[ñÑ]/g, "[ñn]"),
+    );
+
+  return new RegExp(words.join("\\s*[-–]?\\s*"), "i");
+}
+
 function sireValue(row, ...names) {
   const entries = Object.entries(row || {});
   for (const name of names) {
@@ -894,28 +914,163 @@ class SunatClient {
   }
 
   async clickMenuStep(page, xpath, text) {
+    const labels = Array.isArray(text) ? text : [text];
+
     if (xpath) {
       const byXpath = page.locator(`xpath=${xpath}`).first();
       if ((await byXpath.count()) > 0) {
         try {
+          await byXpath.scrollIntoViewIfNeeded().catch(() => undefined);
           await byXpath.click({ timeout: 15000 });
-          await page.waitForTimeout(900);
+          await page.waitForTimeout(1000);
           return true;
         } catch (error) {
-          this.log(`Click por XPath falló (${text}): ${error.message}`);
+          this.log(`Click por XPath falló (${labels[0]}): ${error.message}`);
         }
       }
     }
 
-    const byText = page.getByText(new RegExp(text, "i")).first();
-    if ((await byText.count()) > 0) {
+    for (const label of labels) {
+      const matches = page.getByText(menuTextRegex(label));
+      const count = Math.min(await matches.count().catch(() => 0), 40);
+
+      // El menú anida los textos en contenedores grandes. Se elige el nodo
+      // visible con menos texto para hacer clic en la opción real y no en su
+      // padre (o en una copia oculta del menú móvil).
+      let target = null;
+      let targetLength = Infinity;
+      let fallback = null;
+      let fallbackLength = Infinity;
+      for (let index = 0; index < count; index++) {
+        const candidate = matches.nth(index);
+        const content = (await candidate.innerText().catch(() => "")).trim();
+        if (!content) continue;
+
+        if (content.length < fallbackLength) {
+          fallback = candidate;
+          fallbackLength = content.length;
+        }
+
+        const visible = await candidate.isVisible().catch(() => false);
+        if (visible && content.length < targetLength) {
+          target = candidate;
+          targetLength = content.length;
+        }
+      }
+
+      if (!target) target = fallback;
+      if (!target) continue;
+
       try {
-        await byText.click({ timeout: 10000 });
-        await page.waitForTimeout(800);
+        await target.scrollIntoViewIfNeeded().catch(() => undefined);
+        await target.click({ timeout: 10000 });
+        await page.waitForTimeout(1000);
         return true;
       } catch (error) {
-        this.log(`Click por texto falló (${text}): ${error.message}`);
+        this.log(`Click por texto falló (${label}): ${error.message}`);
+        try {
+          await target.click({ timeout: 5000, force: true });
+          await page.waitForTimeout(1000);
+          return true;
+        } catch (forceError) {
+          this.log(`Click forzado falló (${label}): ${forceError.message}`);
+        }
       }
+    }
+
+    return false;
+  }
+
+  captureDebug(page, prefix = "menu") {
+    const debugDir = path.join(
+      process.env.SUNAT_DATA_DIR || process.cwd(),
+      "output",
+      "debug",
+    );
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+
+    try {
+      fs.mkdirSync(debugDir, { recursive: true });
+      const screenshot = path.join(debugDir, `${prefix}-${stamp}.png`);
+      const html = path.join(debugDir, `${prefix}-${stamp}.html`);
+      return page
+        .screenshot({ path: screenshot, fullPage: true })
+        .catch(() => undefined)
+        .then(() => page.content().catch(() => ""))
+        .then((content) => {
+          fs.writeFileSync(html, content, "utf8");
+          return ` Debug: ${screenshot}`;
+        });
+    } catch {
+      return Promise.resolve("");
+    }
+  }
+
+  async waitForConsultaModule(page, menuFrame, timeoutMs = 45000) {
+    const started = Date.now();
+
+    while (Date.now() - started < timeoutMs) {
+      const iframeCount = await menuFrame
+        .locator("iframe#iframeApplication")
+        .count()
+        .catch(() => 0);
+      if (iframeCount > 0) {
+        return { locator: menuFrame.frameLocator("iframe#iframeApplication") };
+      }
+
+      const moduleFrame = page.frames().find(
+        (frame) =>
+          frame !== page.mainFrame() &&
+          /^https?:\/\/ww1\.sunat\.gob\.pe/i.test(frame.url()) &&
+          /consultar|itcons|conscpe/i.test(frame.url()),
+      );
+      if (moduleFrame) return { frame: moduleFrame };
+
+      const otherPage = page
+        .context()
+        .pages()
+        .find(
+          (candidate) =>
+            candidate !== page &&
+            /^https?:\/\/ww1\.sunat\.gob\.pe/i.test(candidate.url()) &&
+            /consultar|itcons|conscpe/i.test(candidate.url()),
+        );
+      if (otherPage) return { page: otherPage };
+
+      await page.waitForTimeout(500);
+    }
+
+    return null;
+  }
+
+  async openConsultaDirect(page) {
+    this.log("No se detectó el módulo en el menú; se intenta abrir la consulta directamente...");
+
+    try {
+      await page.goto(CONSULTA_URL, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000,
+      });
+    } catch (error) {
+      this.log(`No se pudo abrir la consulta directa: ${error.message}`);
+      return false;
+    }
+
+    await page.waitForTimeout(3000);
+
+    if (/loginMenuSol/i.test(page.url())) return false;
+
+    const body = (await page.locator("body").innerText().catch(() => "")) || "";
+    if (/no se ha enviado correctamente los parametros de autenticacion/i.test(body)) {
+      this.log("El módulo directo rechazó la sesión.");
+      return false;
+    }
+
+    if (/tipoConsulta|Fecha de Inicio|Comprobantes?|Factura|Boleta/i.test(body)) {
+      this.consultaUrl = CONSULTA_URL;
+      this.consultaReferer = CONSULTA_URL;
+      this.log(`Módulo SUNAT directo: ${CONSULTA_URL}`);
+      return true;
     }
 
     return false;
@@ -988,24 +1143,7 @@ class SunatClient {
 
     if (!menuFrame) {
       const body = (await page.locator("body").innerText().catch(() => "")) || "";
-      const debugDir = path.join(
-        process.env.SUNAT_DATA_DIR || process.cwd(),
-        "output",
-        "debug",
-      );
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      let debugInfo = "";
-
-      try {
-        fs.mkdirSync(debugDir, { recursive: true });
-        const screenshot = path.join(debugDir, `menu-${stamp}.png`);
-        const html = path.join(debugDir, `menu-${stamp}.html`);
-        await page.screenshot({ path: screenshot, fullPage: true }).catch(() => undefined);
-        fs.writeFileSync(html, await page.content().catch(() => ""), "utf8");
-        debugInfo = ` Debug: ${screenshot}`;
-      } catch {
-        // El diagnóstico es opcional.
-      }
+      const debugInfo = await this.captureDebug(page, "menu");
 
       this.log(`Frames: ${page.frames().map((frame) => frame.url()).join(" | ")}`);
 
@@ -1017,71 +1155,132 @@ class SunatClient {
       );
     }
 
-    await this.clickMenuStep(
-      menuFrame,
-      "/html/body/div[5]/div[2]/div[1]/div/div[contains(normalize-space(.), 'Empresas')]",
-      "Empresas",
-    );
-    await this.clickMenuStep(
-      menuFrame,
-      "/html/body/div[5]/div[2]/div[2]/div//span[contains(normalize-space(.), 'Comprobantes de pago')]",
-      "Comprobantes de pago",
-    );
-    await this.clickMenuStep(
-      menuFrame,
-      "/html/body/div[5]/div[2]/div[2]/div/div[1]/div/div/ul/li[12]/li/span[contains(normalize-space(.), 'SEE - SOL')]",
-      "SEE - SOL",
-    );
+    const step = async (xpath, labels) => {
+      const ok = await this.clickMenuStep(menuFrame, xpath, labels);
+      const label = Array.isArray(labels) ? labels[0] : labels;
+      this.log(`Menú ${ok ? "OK" : "sin coincidencia"}: ${label}`);
+      return ok;
+    };
+
+    const isVisibleLabel = async (labels) => {
+      for (const label of labels) {
+        const matches = menuFrame.getByText(menuTextRegex(label));
+        const count = Math.min(await matches.count().catch(() => 0), 20);
+        for (let index = 0; index < count; index++) {
+          if (await matches.nth(index).isVisible().catch(() => false)) return true;
+        }
+      }
+      return false;
+    };
+
+    const comprobantesLabels = ["Comprobantes de pago", "Comprobante de Pago"];
+    const seeLabels = ["SEE - SOL", "SEE-SOL", "SEE SOL", "Emisión Electrónica SOL"];
+    const seeXpath =
+      "/html/body/div[5]/div[2]/div[2]/div/div[1]/div/div/ul/li[12]/li/span[contains(normalize-space(.), 'SEE - SOL')]";
+    const comprobantesXpath =
+      "/html/body/div[5]/div[2]/div[2]/div//span[contains(normalize-space(.), 'Comprobantes de pago')]";
+
+    const abrirConsultar = async ({ itemLabels, itemXpath, consultarLabels, consultarXpath }) => {
+      if (await isVisibleLabel(consultarLabels)) {
+        await step(consultarXpath, consultarLabels);
+        return;
+      }
+
+      if (!(await isVisibleLabel(itemLabels))) {
+        if (!(await isVisibleLabel(seeLabels))) {
+          await step(comprobantesXpath, comprobantesLabels);
+        }
+        await step(seeXpath, seeLabels);
+      }
+
+      await step(itemXpath, itemLabels);
+      await step(consultarXpath, consultarLabels);
+    };
+
+    // Si el menú ya viene expandido no se vuelve a hacer clic en "Empresas":
+    // hacerlo colapsaría la rama y ocultaría las opciones de Comprobantes.
+    if (!(await isVisibleLabel(comprobantesLabels))) {
+      await step(
+        "/html/body/div[5]/div[2]/div[1]/div/div[contains(normalize-space(.), 'Empresas')]",
+        ["Empresas"],
+      );
+    }
+
     if (this.documento === "boleta") {
-      const opened = await this.clickMenuStep(
-        menuFrame,
-        null,
-        "Boleta de Venta Electrónica",
-      );
-      if (!opened) {
-        await this.clickMenuStep(menuFrame, null, "Boleta de Venta");
-      }
-
-      const consulted = await this.clickMenuStep(
-        menuFrame,
-        null,
-        "Consultar Boleta de Venta y Nota",
-      );
-      if (!consulted) {
-        await this.clickMenuStep(menuFrame, null, "Consultar Boleta");
-      }
+      await abrirConsultar({
+        itemLabels: [
+          "Boleta de Venta Electrónica",
+          "Boletas de Venta Electrónicas",
+          "Boleta de Venta",
+        ],
+        itemXpath: null,
+        consultarLabels: [
+          "Consultar Boleta de Venta y Nota",
+          "Consultar Boleta de Venta",
+          "Consultar Boleta",
+          "Consulta de Boletas",
+        ],
+        consultarXpath: null,
+      });
     } else {
-      await this.clickMenuStep(
-        menuFrame,
-        "/html/body/div[5]/div[2]/div[2]/div/div[1]/div/div/ul/li[12]/li[10]/li/span[contains(normalize-space(.), 'Factura Electrónica')]",
-        "Factura Electrónica",
-      );
-      await this.clickMenuStep(
-        menuFrame,
-        "/html/body/div[5]/div[2]/div[2]/div/div[1]/div/div/ul/li[12]/li[10]/li[4]/li/span[contains(normalize-space(.), 'Consultar Factura y Nota')]",
-        "Consultar Factura y Nota",
-      );
+      await abrirConsultar({
+        itemLabels: ["Factura Electrónica", "Facturas Electrónicas", "Factura Electronica"],
+        itemXpath:
+          "/html/body/div[5]/div[2]/div[2]/div/div[1]/div/div/ul/li[12]/li[10]/li/span[contains(normalize-space(.), 'Factura Electrónica')]",
+        consultarLabels: [
+          "Consultar Factura y Nota",
+          "Consultar Factura, Boleta y Notas",
+          "Consultar Factura",
+          "Consulta de Facturas",
+          "Consultar Comprobantes",
+        ],
+        consultarXpath:
+          "/html/body/div[5]/div[2]/div[2]/div/div[1]/div/div/ul/li[12]/li[10]/li[4]/li/span[contains(normalize-space(.), 'Consultar Factura y Nota')]",
+      });
     }
 
-    const iframe = menuFrame.locator("iframe#iframeApplication");
-    try {
-      await iframe.waitFor({ state: "attached", timeout: 40000 });
-    } catch {
-      throw new Error(
-        "SUNAT no abrió el módulo de consulta. Activa \"Mostrar navegador\" para ver el menú y verifica que tu usuario tenga acceso a esa opción.",
-      );
+    const opened = await this.waitForConsultaModule(page, menuFrame);
+
+    if (opened?.page) {
+      const url = new URL(opened.page.url());
+      this.consultaUrl = `${url.origin}${url.pathname}`;
+      this.consultaReferer = this.consultaUrl;
+      this.log(`Módulo SUNAT: ${this.consultaUrl}`);
+      return;
     }
 
-    const frame = menuFrame.frameLocator("iframe#iframeApplication");
-    await frame.locator("body").waitFor({ state: "visible", timeout: 40000 });
-    await page.waitForTimeout(2500);
-
-    const body = (await frame.locator("body").innerText().catch(() => "")) || "";
-    if (/no se ha enviado correctamente los parametros de autenticacion/i.test(body)) {
-      throw new Error("SUNAT no habilitó la sesión del módulo de consulta.");
+    if (opened?.frame) {
+      const url = new URL(opened.frame.url());
+      this.consultaUrl = `${url.origin}${url.pathname}`;
+      this.consultaReferer = this.consultaUrl;
+      this.log(`Módulo SUNAT: ${this.consultaUrl}`);
+      return;
     }
 
-    await this.captureModuleUrl(page);
+    if (opened?.locator) {
+      await opened.locator
+        .locator("body")
+        .waitFor({ state: "visible", timeout: 40000 });
+      await page.waitForTimeout(2500);
+
+      const body = (await opened.locator.locator("body").innerText().catch(() => "")) || "";
+      if (/no se ha enviado correctamente los parametros de autenticacion/i.test(body)) {
+        throw new Error("SUNAT no habilitó la sesión del módulo de consulta.");
+      }
+
+      await this.captureModuleUrl(page);
+      return;
+    }
+
+    const debugInfo = await this.captureDebug(page, "consulta");
+    if (await this.openConsultaDirect(page)) return;
+
+    this.log(`Frames: ${page.frames().map((frame) => frame.url()).join(" | ")}`);
+
+    throw new Error(
+      "SUNAT no abrió el módulo de consulta. Activa \"Mostrar navegador\" para ver el menú " +
+        `y verifica que tu usuario tenga acceso a esa opción.${debugInfo}`,
+    );
   }
 
   /**

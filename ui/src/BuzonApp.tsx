@@ -39,6 +39,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { DateRangePicker, type DateRange } from "@/components/date-range-picker";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -170,6 +171,33 @@ function formatDate(value: string): string {
   return value;
 }
 
+function parseFecha(value: string): number {
+  const text = (value || "").trim();
+  if (!text) return 0;
+
+  const sunat = text.match(
+    /^(\d{2})\/(\d{2})\/(\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/,
+  );
+  if (sunat) {
+    const [, day, month, year, hour = "0", minute = "0", second = "0"] = sunat;
+    return new Date(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second),
+    ).getTime();
+  }
+
+  const parsed = Date.parse(text);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function itemDate(item: BuzonItem): number {
+  return parseFecha(item.fecha_publicacion || item.fecha_envio);
+}
+
 function stateLabel(state: string): string {
   return (
     {
@@ -194,6 +222,7 @@ export default function BuzonApp() {
   const [notice, setNotice] = useState("");
   const [filtro, setFiltro] = useState<"pendientes" | "todos">("pendientes");
   const [empresaFiltro, setEmpresaFiltro] = useState("all");
+  const [rangoFechas, setRangoFechas] = useState<DateRange>({ from: undefined });
 
   const [empresaDialog, setEmpresaDialog] = useState(false);
   const [form, setForm] = useState<EmpresaForm>(EMPTY_FORM);
@@ -500,15 +529,45 @@ export default function BuzonApp() {
   );
 
   const items = useMemo(() => {
+    const desde = rangoFechas.from
+      ? new Date(
+          rangoFechas.from.getFullYear(),
+          rangoFechas.from.getMonth(),
+          rangoFechas.from.getDate(),
+        ).getTime()
+      : null;
+    const hasta = rangoFechas.to
+      ? new Date(
+          rangoFechas.to.getFullYear(),
+          rangoFechas.to.getMonth(),
+          rangoFechas.to.getDate(),
+          23,
+          59,
+          59,
+          999,
+        ).getTime()
+      : rangoFechas.from
+        ? new Date(
+            rangoFechas.from.getFullYear(),
+            rangoFechas.from.getMonth(),
+            rangoFechas.from.getDate(),
+            23,
+            59,
+            59,
+            999,
+          ).getTime()
+        : null;
+
     return allItems
       .filter((item) => (empresaFiltro === "all" ? true : item.empresa_id === empresaFiltro))
       .filter((item) => (filtro === "todos" ? true : !item.enviado))
-      .sort((a, b) => {
-        const left = a.fecha_publicacion || a.fecha_envio || "";
-        const right = b.fecha_publicacion || b.fecha_envio || "";
-        return right.localeCompare(left);
-      });
-  }, [allItems, empresaFiltro, filtro]);
+      .filter((item) => {
+        if (desde === null || hasta === null) return true;
+        const fecha = itemDate(item);
+        return fecha >= desde && fecha <= hasta;
+      })
+      .sort((a, b) => itemDate(b) - itemDate(a));
+  }, [allItems, empresaFiltro, filtro, rangoFechas]);
 
   const pendientes = allItems.filter((item) => !item.enviado).length;
   const nuevos = allItems.filter((item) => item.nuevo && !item.enviado && !item.linea_base).length;
@@ -742,6 +801,23 @@ export default function BuzonApp() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <DateRangePicker
+              value={rangoFechas}
+              onChange={setRangoFechas}
+              className="h-9 w-[220px] rounded-lg"
+            />
+            {rangoFechas.from && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-9 px-2 text-xs"
+                onClick={() => setRangoFechas({ from: undefined })}
+                title="Quitar filtro de fechas"
+              >
+                Limpiar
+              </Button>
+            )}
             <select
               value={empresaFiltro}
               onChange={(event) => setEmpresaFiltro(event.target.value)}

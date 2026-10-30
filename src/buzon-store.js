@@ -42,11 +42,34 @@ function readAllState() {
   return readState();
 }
 
+function parseFecha(value) {
+  const text = String(value || "").trim();
+  if (!text) return 0;
+
+  const sunat = text.match(
+    /^(\d{2})\/(\d{2})\/(\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/,
+  );
+  if (sunat) {
+    const [, day, month, year, hour = "0", minute = "0", second = "0"] = sunat;
+    return new Date(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second),
+    ).getTime();
+  }
+
+  const parsed = Date.parse(text);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
 function sortItems(items) {
   return [...items].sort((a, b) => {
-    const left = String(a.fecha_publicacion || a.fecha_envio || "");
-    const right = String(b.fecha_publicacion || b.fecha_envio || "");
-    return right.localeCompare(left);
+    const left = parseFecha(a.fecha_publicacion || a.fecha_envio);
+    const right = parseFecha(b.fecha_publicacion || b.fecha_envio);
+    return right - left;
   });
 }
 
