@@ -1020,7 +1020,7 @@ function StatusCard({ job }: { job: Job }) {
               className="shrink-0 gap-1.5 text-xs"
             >
               {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-              {copied ? "Copiado" : "Copiar error"}
+              {copied ? "Copiado" : job.status === "error" ? "Copiar error" : "Copiar registro"}
             </Button>
           </div>
         )}

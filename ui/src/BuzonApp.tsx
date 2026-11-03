@@ -673,7 +673,7 @@ export default function BuzonApp() {
                       className="h-7 gap-1.5 px-2.5 text-xs"
                     >
                       {copiedLog ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-                      {copiedLog ? "Copiado" : "Copiar error"}
+                      {copiedLog ? "Copiado" : job.status === "error" ? "Copiar error" : "Copiar registro"}
                     </Button>
                   )}
                   {job.status === "done" ? (
