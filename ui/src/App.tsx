@@ -4,7 +4,9 @@ import { es } from "date-fns/locale";
 import {
   AlertCircle,
   Bell,
+  Check,
   CloudDownload,
+  Copy,
   Eye,
   EyeOff,
   FileCode2,
@@ -952,6 +954,34 @@ function Checkbox({
 
 function StatusCard({ job }: { job: Job }) {
   const percent = progressPercent(job);
+  const [copied, setCopied] = useState(false);
+
+  const copyLog = async () => {
+    const text = [
+      job.message,
+      ...job.logs.map((entry) => entry.message),
+      job.error ? `Error: ${job.error}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand("copy");
+      document.body.removeChild(area);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    }
+  };
 
   return (
     <Card>
@@ -974,14 +1004,25 @@ function StatusCard({ job }: { job: Job }) {
         </div>
 
         {job.logs.length > 0 && (
-          <details className="mt-3 text-xs text-muted-foreground">
-            <summary className="cursor-pointer font-medium text-foreground/70">
-              Ver registro
-            </summary>
-            <pre className="mt-2 max-h-40 overflow-auto rounded-lg bg-slate-950 p-3 text-[11px] leading-relaxed text-slate-300">
-              {job.logs.map((entry) => entry.message).join("\n")}
-            </pre>
-          </details>
+          <div className="mt-3 flex items-start justify-between gap-2">
+            <details className="min-w-0 flex-1 text-xs text-muted-foreground">
+              <summary className="cursor-pointer font-medium text-foreground/70">
+                Ver registro
+              </summary>
+              <pre className="mt-2 max-h-40 overflow-auto rounded-lg bg-slate-950 p-3 text-[11px] leading-relaxed text-slate-300">
+                {job.logs.map((entry) => entry.message).join("\n")}
+              </pre>
+            </details>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void copyLog()}
+              className="shrink-0 gap-1.5 text-xs"
+            >
+              {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+              {copied ? "Copiado" : "Copiar error"}
+            </Button>
+          </div>
         )}
       </CardContent>
     </Card>

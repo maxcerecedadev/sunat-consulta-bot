@@ -913,15 +913,126 @@ class SunatClient {
     this.log(`Sesión SOL iniciada (${activePage.url()}).`);
   }
 
+  async menuLabelVisible(page, labels) {
+    const list = Array.isArray(labels) ? labels : [labels];
+
+    for (const label of list) {
+      const matches = page.getByText(menuTextRegex(label));
+      const count = Math.min(await matches.count().catch(() => 0), 20);
+      for (let index = 0; index < count; index++) {
+        if (await matches.nth(index).isVisible().catch(() => false)) return true;
+      }
+    }
+
+    return false;
+  }
+
+  async waitForMenuLabel(page, labels, timeoutMs = 4000) {
+    const started = Date.now();
+
+    do {
+      if (await this.menuLabelVisible(page, labels)) return true;
+      await page.waitForTimeout(250);
+    } while (Date.now() - started < timeoutMs);
+
+    return false;
+  }
+
+  /**
+   * El menú de SUNAT no anida las opciones con <ul>: todas las opciones son
+   * <li> planos y la jerarquía se declara en data-padre1/data-padre2/data-padre3
+   * (más un contenedor nivelNCuerpo_* por cada rama). Cuando la opción existe
+   * pero está oculta, se hacen visibles sus padres y la propia opción para que
+   * Playwright pueda hacer clic. No se hace clic en los padres porque eso
+   * alternaría ramas ya abiertas y las colapsaría.
+   */
+  async revealMenuTarget(locator) {
+    return locator
+      .evaluate((element) => {
+        const item = element.closest("li");
+        if (!item) return false;
+
+        const show = (node) => {
+          if (!node) return;
+          node.style.display = "block";
+        };
+
+        const parents = [
+          item.getAttribute("data-padre1"),
+          item.getAttribute("data-padre2"),
+          item.getAttribute("data-padre3"),
+        ].filter(Boolean);
+
+        if (parents.length === 0) {
+          // Variante con <li>/<ul> anidados (menú cabina u otras versiones).
+          const headers = [];
+          let li = item;
+          while (li) {
+            const parentLi = li.parentElement ? li.parentElement.closest("li") : null;
+            if (!parentLi) break;
+            const header = parentLi.querySelector(":scope > span, :scope > a");
+            if (header) headers.unshift(header);
+            li = parentLi;
+          }
+
+          for (const header of headers) {
+            header.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+            header.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+            header.click();
+          }
+
+          return headers.length > 0;
+        }
+
+        for (const selector of parents) {
+          const parent = document.querySelector(selector);
+          if (!parent) continue;
+
+          show(parent);
+
+          const id2 = parent.getAttribute("data-id2");
+          const level = (parent.className.match(/nivel(\d)/) || [])[1];
+          if (level && id2) {
+            show(document.getElementById(`nivel${level}Cuerpo_${id2}`));
+          }
+
+          // Menú plano: mostrar los hijos declarados para ese padre.
+          document
+            .querySelectorAll(
+              `li[data-padre1="${selector}"], li[data-padre2="${selector}"], li[data-padre3="${selector}"]`,
+            )
+            .forEach(show);
+        }
+
+        show(item);
+
+        // Asegurar que ningún contenedor ancestro siga oculto (por ejemplo la
+        // copia del menú que corresponde a esta opción).
+        let ancestor = item.parentElement;
+        while (ancestor && ancestor !== document.body) {
+          if (getComputedStyle(ancestor).display === "none") show(ancestor);
+          ancestor = ancestor.parentElement;
+        }
+
+        return true;
+      })
+      .catch(() => false);
+  }
+
   async clickMenuStep(page, xpath, text) {
     const labels = Array.isArray(text) ? text : [text];
 
     if (xpath) {
       const byXpath = page.locator(`xpath=${xpath}`).first();
-      if ((await byXpath.count()) > 0) {
+      const exists = (await byXpath.count().catch(() => 0)) > 0;
+      const visible = exists && (await byXpath.isVisible().catch(() => false));
+
+      // Si el XPath apunta a una copia oculta del menú, se ignora y se usa la
+      // búsqueda por texto, que sí puede expandir la rama padre.
+      if (visible) {
         try {
           await byXpath.scrollIntoViewIfNeeded().catch(() => undefined);
-          await byXpath.click({ timeout: 15000 });
+          await byXpath.click({ timeout: 8000 });
           await page.waitForTimeout(1000);
           return true;
         } catch (error) {
@@ -931,50 +1042,77 @@ class SunatClient {
     }
 
     for (const label of labels) {
-      const matches = page.getByText(menuTextRegex(label));
-      const count = Math.min(await matches.count().catch(() => 0), 40);
+      // Segundo intento tras expandir las ramas ancestro que estén cerradas.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const matches = page.getByText(menuTextRegex(label));
+        const count = Math.min(await matches.count().catch(() => 0), 40);
 
-      // El menú anida los textos en contenedores grandes. Se elige el nodo
-      // visible con menos texto para hacer clic en la opción real y no en su
-      // padre (o en una copia oculta del menú móvil).
-      let target = null;
-      let targetLength = Infinity;
-      let fallback = null;
-      let fallbackLength = Infinity;
-      for (let index = 0; index < count; index++) {
-        const candidate = matches.nth(index);
-        const content = (await candidate.innerText().catch(() => "")).trim();
-        if (!content) continue;
+        // El menú anida los textos en contenedores grandes. Se elige el nodo
+        // visible con menos texto para hacer clic en la opción real y no en su
+        // padre (o en una copia oculta del menú móvil).
+        let target = null;
+        let targetLength = Infinity;
+        let fallback = null;
+        let fallbackLength = Infinity;
+        for (let index = 0; index < count; index++) {
+          const candidate = matches.nth(index);
+          const content = (await candidate.innerText().catch(() => "")).trim();
+          if (!content) continue;
 
-        if (content.length < fallbackLength) {
-          fallback = candidate;
-          fallbackLength = content.length;
+          if (content.length < fallbackLength) {
+            fallback = candidate;
+            fallbackLength = content.length;
+          }
+
+          const visible = await candidate.isVisible().catch(() => false);
+          if (visible && content.length < targetLength) {
+            target = candidate;
+            targetLength = content.length;
+          }
         }
 
-        const visible = await candidate.isVisible().catch(() => false);
-        if (visible && content.length < targetLength) {
-          target = candidate;
-          targetLength = content.length;
+        if (!target) target = fallback;
+        if (!target) break;
+
+        if (!(await target.isVisible().catch(() => false))) {
+          const revealed = await this.revealMenuTarget(target);
+          if (revealed) {
+            this.log(`Menú: opción revelada (${label})`);
+            await page.waitForTimeout(600);
+            continue;
+          }
         }
-      }
 
-      if (!target) target = fallback;
-      if (!target) continue;
-
-      try {
-        await target.scrollIntoViewIfNeeded().catch(() => undefined);
-        await target.click({ timeout: 10000 });
-        await page.waitForTimeout(1000);
-        return true;
-      } catch (error) {
-        this.log(`Click por texto falló (${label}): ${error.message}`);
         try {
-          await target.click({ timeout: 5000, force: true });
+          await target.scrollIntoViewIfNeeded().catch(() => undefined);
+          await target.click({ timeout: 10000 });
           await page.waitForTimeout(1000);
           return true;
-        } catch (forceError) {
-          this.log(`Click forzado falló (${label}): ${forceError.message}`);
+        } catch (error) {
+          this.log(`Click por texto falló (${label}): ${error.message}`);
+          try {
+            await target.click({ timeout: 5000, force: true });
+            await page.waitForTimeout(1000);
+            return true;
+          } catch (forceError) {
+            this.log(`Click forzado falló (${label}): ${forceError.message}`);
+
+            // Último recurso: disparar el click en el DOM aunque el nodo siga
+            // oculto (por ejemplo si el menú usa manejadores propios).
+            const clicked = await target
+              .evaluate((element) => {
+                element.click();
+                return true;
+              })
+              .catch(() => false);
+            if (clicked) {
+              await page.waitForTimeout(1500);
+              return true;
+            }
+          }
         }
+
+        break;
       }
     }
 
@@ -1162,39 +1300,91 @@ class SunatClient {
       return ok;
     };
 
-    const isVisibleLabel = async (labels) => {
-      for (const label of labels) {
-        const matches = menuFrame.getByText(menuTextRegex(label));
-        const count = Math.min(await matches.count().catch(() => 0), 20);
-        for (let index = 0; index < count; index++) {
-          if (await matches.nth(index).isVisible().catch(() => false)) return true;
-        }
-      }
-      return false;
-    };
+    const isVisibleLabel = (labels) => this.menuLabelVisible(menuFrame, labels);
 
     const comprobantesLabels = ["Comprobantes de pago", "Comprobante de Pago"];
     const seeLabels = ["SEE - SOL", "SEE-SOL", "SEE SOL", "Emisión Electrónica SOL"];
-    const seeXpath =
-      "/html/body/div[5]/div[2]/div[2]/div/div[1]/div/div/ul/li[12]/li/span[contains(normalize-space(.), 'SEE - SOL')]";
     const comprobantesXpath =
       "/html/body/div[5]/div[2]/div[2]/div//span[contains(normalize-space(.), 'Comprobantes de pago')]";
 
+    // Atajo: el menú de SUNAT expone una función que ejecuta directamente la
+    // opción de nivel 4 (la que abre el módulo) usando su data-id, sin depender
+    // de que las ramas estén visibles o expandidas.
+    const ejecutarDirecto = async (labels) => {
+      for (const label of labels) {
+        const matches = menuFrame.getByText(menuTextRegex(label));
+        const count = Math.min(await matches.count().catch(() => 0), 40);
+
+        for (let index = 0; index < count; index++) {
+          const node = matches.nth(index);
+          const code = await node
+            .evaluate((element) => {
+              const li = element.closest("li");
+              return li && li.classList.contains("nivel4")
+                ? li.getAttribute("data-id")
+                : null;
+            })
+            .catch(() => null);
+          if (!code) continue;
+
+          const executed = await menuFrame
+            .evaluate((id) => {
+              try {
+                const $ = window.jQuery || window.$;
+                const li = document.querySelector(`li.nivel4[data-id="${id}"]`);
+                if (!$ || !li) return false;
+
+                if (typeof window.clickEnNivel4 === "function") {
+                  window.clickEnNivel4($(li));
+                  return true;
+                }
+
+                if (typeof window.logoutAndLoad === "function") {
+                  window.logoutAndLoad("MenuInternet.htm?action=execute&code=" + id);
+                  return true;
+                }
+              } catch {
+                return false;
+              }
+
+              return false;
+            }, code)
+            .catch(() => false);
+
+          if (executed) {
+            this.log(`Menú ejecutado directamente: ${label}`);
+            return true;
+          }
+        }
+      }
+
+      return false;
+    };
+
     const abrirConsultar = async ({ itemLabels, itemXpath, consultarLabels, consultarXpath }) => {
-      if (await isVisibleLabel(consultarLabels)) {
+      if (await this.waitForMenuLabel(menuFrame, consultarLabels, 2500)) {
         await step(consultarXpath, consultarLabels);
         return;
       }
 
-      if (!(await isVisibleLabel(itemLabels))) {
-        if (!(await isVisibleLabel(seeLabels))) {
+      if (!(await this.menuLabelVisible(menuFrame, itemLabels))) {
+        if (!(await this.menuLabelVisible(menuFrame, seeLabels))) {
           await step(comprobantesXpath, comprobantesLabels);
+          await this.waitForMenuLabel(menuFrame, seeLabels, 4000);
         }
-        await step(seeXpath, seeLabels);
+
+        // clickMenuStep hace visible la opción aunque su rama esté cerrada.
+        await step(itemXpath, itemLabels);
       }
 
-      await step(itemXpath, itemLabels);
-      await step(consultarXpath, consultarLabels);
+      await this.waitForMenuLabel(menuFrame, consultarLabels, 5000);
+
+      if (await this.menuLabelVisible(menuFrame, consultarLabels)) {
+        await step(consultarXpath, consultarLabels);
+        return;
+      }
+
+      await ejecutarDirecto(consultarLabels);
     };
 
     // Si el menú ya viene expandido no se vuelve a hacer clic en "Empresas":

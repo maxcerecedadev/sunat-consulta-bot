@@ -235,6 +235,7 @@ export default function BuzonApp() {
   const [sending, setSending] = useState(false);
   const [sendingItem, setSendingItem] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedLog, setCopiedLog] = useState(false);
 
   const waPoll = useRef<number | null>(null);
 
@@ -453,6 +454,25 @@ export default function BuzonApp() {
     }
   };
 
+  const copyJobLog = async () => {
+    if (!job) return;
+    const text = [
+      job.message,
+      ...job.logs.map((entry) => entry.message),
+      job.error ? `Error: ${job.error}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedLog(true);
+      window.setTimeout(() => setCopiedLog(false), 1800);
+    } catch {
+      setError("No se pudo copiar. Selecciona el texto y cópialo manualmente.");
+    }
+  };
+
   const markSent = async (item: BuzonItem) => {
     try {
       const response = await fetch("/api/buzon/mark-sent", {
@@ -644,17 +664,30 @@ export default function BuzonApp() {
             <div className="rounded-xl border bg-muted/30 p-3 text-sm">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-medium">{job.message}</span>
-                {job.status === "done" ? (
-                  <Badge variant="outline" className="border-success/30 bg-success/10 text-success">
-                    Completado
-                  </Badge>
-                ) : job.status === "error" ? (
-                  <Badge variant="outline" className="border-destructive/30 bg-destructive/10 text-destructive">
-                    Error
-                  </Badge>
-                ) : (
-                  <Badge variant="outline">En curso</Badge>
-                )}
+                <div className="flex items-center gap-2">
+                  {job.logs.length > 0 && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void copyJobLog()}
+                      className="h-7 gap-1.5 px-2.5 text-xs"
+                    >
+                      {copiedLog ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                      {copiedLog ? "Copiado" : "Copiar error"}
+                    </Button>
+                  )}
+                  {job.status === "done" ? (
+                    <Badge variant="outline" className="border-success/30 bg-success/10 text-success">
+                      Completado
+                    </Badge>
+                  ) : job.status === "error" ? (
+                    <Badge variant="outline" className="border-destructive/30 bg-destructive/10 text-destructive">
+                      Error
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline">En curso</Badge>
+                  )}
+                </div>
               </div>
               {job.logs.length > 0 && (
                 <details className="mt-2 text-xs text-muted-foreground">
