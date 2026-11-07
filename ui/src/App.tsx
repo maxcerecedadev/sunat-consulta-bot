@@ -58,6 +58,7 @@ import {
 import { cn } from "@/lib/utils";
 
 const PREF_KEY = "sunat-consulta-prefs";
+const ACTIVE_JOB_KEY = "sunat-active-job";
 
 interface InvoiceItem {
   line: string;
@@ -314,6 +315,11 @@ export default function App() {
     void loadHistory(1);
   }, [loadHistory]);
 
+  useEffect(() => {
+    const saved = localStorage.getItem(ACTIVE_JOB_KEY);
+    if (saved) setJobId(saved);
+  }, []);
+
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
@@ -370,7 +376,15 @@ export default function App() {
     const timer = window.setInterval(async () => {
       try {
         const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
-        if (!response.ok) throw new Error("No se pudo consultar el estado del proceso.");
+        if (!response.ok) {
+          if (response.status === 404) {
+            localStorage.removeItem(ACTIVE_JOB_KEY);
+            setJobId(null);
+            setJob(null);
+            return;
+          }
+          throw new Error("No se pudo consultar el estado del proceso.");
+        }
 
         const data: Job = await response.json();
         if (!active) return;
@@ -379,6 +393,7 @@ export default function App() {
 
         if (["done", "error", "cancelled"].includes(data.status)) {
           window.clearInterval(timer);
+          localStorage.removeItem(ACTIVE_JOB_KEY);
           if (data.status === "error") {
             setError(data.error || "La consulta terminó con error.");
           }
@@ -498,6 +513,7 @@ export default function App() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "No se pudo iniciar la consulta.");
+      localStorage.setItem(ACTIVE_JOB_KEY, data.jobId);
       setJobId(data.jobId);
     } catch (submitError) {
       setJob(null);
@@ -505,12 +521,18 @@ export default function App() {
     }
   };
 
+  const cancelJob = async (id: string) => {
+    await fetch(`/api/jobs/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+    }).catch(() => undefined);
+    await loadHistory(historyPage);
+  };
+
   const handleCancel = async () => {
     if (!jobId) return;
     setCancelling(true);
-    await fetch(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" }).catch(
-      () => undefined,
-    );
+    await cancelJob(jobId);
+    localStorage.removeItem(ACTIVE_JOB_KEY);
     setCancelling(false);
   };
 
@@ -739,9 +761,9 @@ export default function App() {
         </Card>
 
         {error && (
-          <div className="flex items-start gap-3 rounded-xl border border-destructive/25 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+          <div className="flex items-start gap-3 overflow-hidden rounded-xl border border-destructive/25 bg-destructive/5 px-4 py-3 text-sm text-destructive">
             <AlertCircle className="mt-0.5 size-4 shrink-0" />
-            <span>{error}</span>
+            <span className="min-w-0 max-w-full flex-1 break-words">{error}</span>
           </div>
         )}
 
@@ -798,7 +820,32 @@ export default function App() {
                         </Badge>
                       </TableCell>
                       <TableCell>
-                        <div className="flex justify-center gap-2">
+                        <div className="flex flex-wrap justify-center gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            title="Abrir consulta"
+                            onClick={() => {
+                              setError("");
+                              setJobId(item.id);
+                              window.scrollTo({ top: 0, behavior: "smooth" });
+                            }}
+                          >
+                            <Eye className="size-4" />
+                          </Button>
+                          {["queued", "login", "listing", "processing"].includes(
+                            item.status,
+                          ) && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              title="Cancelar consulta"
+                              className="text-destructive hover:text-destructive"
+                              onClick={() => void cancelJob(item.id)}
+                            >
+                              Cancelar
+                            </Button>
+                          )}
                           {item.hasOutput && (
                             <Button asChild variant="outline" size="sm">
                               <a href={`/api/jobs/${item.id}/zip`} download>
@@ -989,7 +1036,7 @@ function StatusCard({ job }: { job: Job }) {
         <div className="flex items-start justify-between gap-4">
           <div className="grid gap-1">
             <p className="font-semibold">{statusTitle(job.status)}</p>
-            <p className="text-sm text-muted-foreground">{job.message}</p>
+            <p className="break-words text-sm text-muted-foreground">{job.message}</p>
           </div>
           <span className="text-sm text-muted-foreground">
             {job.total > 0 ? `${job.processed} / ${job.total}` : job.status === "done" ? "Listo" : ""}
@@ -1009,7 +1056,7 @@ function StatusCard({ job }: { job: Job }) {
               <summary className="cursor-pointer font-medium text-foreground/70">
                 Ver registro
               </summary>
-              <pre className="mt-2 max-h-40 overflow-auto rounded-lg bg-slate-950 p-3 text-[11px] leading-relaxed text-slate-300">
+              <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-slate-950 p-3 text-[11px] leading-relaxed text-slate-300">
                 {job.logs.map((entry) => entry.message).join("\n")}
               </pre>
             </details>
@@ -1310,7 +1357,7 @@ function DetailBody({ record, jobId }: { record: Invoice; jobId: string }) {
         </div>
       </div>
 
-      {record.error && <p className="text-xs text-destructive">{record.error}</p>}
+      {record.error && <p className="break-words text-xs text-destructive">{record.error}</p>}
 
       <div className="flex flex-wrap justify-end gap-2">
         {xml && (

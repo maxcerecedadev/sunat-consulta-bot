@@ -98,6 +98,7 @@ app.post("/api/consulta", (req, res) => {
     }
 
     const sire = TIPOS_RECIBIDOS.has(tipo);
+    const cpe = documento === "boleta" && !sire;
     if (sire && desde.iso.slice(0, 7) !== hasta.iso.slice(0, 7)) {
       throw new Error(
         "Para comprobantes recibidos selecciona un solo mes: se consultan desde el SIRE (RCE).",
@@ -118,6 +119,7 @@ app.post("/api/consulta", (req, res) => {
       tipo,
       documento,
       sire,
+      cpe,
       soloListar,
       descargarXml: !soloListar && body.descargarXml !== false,
       descargarPdf: !soloListar && body.descargarPdf !== false,
@@ -156,6 +158,7 @@ app.post("/api/consulta", (req, res) => {
         tipo,
         documento,
         sire,
+        cpe,
         desde: desde.iso,
         hasta: hasta.iso,
         soloListar,
@@ -643,7 +646,9 @@ async function runJob(job, credentials, options) {
       };
 
       if (!options.soloListar) {
-        if (options.sire) client.log(`Descargando ${invoice.numero_desc}...`);
+        if (options.sire || options.cpe) {
+          client.log(`Descargando ${invoice.numero_desc}...`);
+        }
         const base = safeName(invoice);
 
         try {
@@ -687,7 +692,7 @@ async function runJob(job, credentials, options) {
         }
 
         // Si el XML falló, el CDR puede seguir disponible por separado.
-        if (options.sire && !record.files.cdr) {
+        if ((options.sire || options.cpe) && !record.files.cdr) {
           try {
             const cdr = await client.descargar(invoice, "cdr");
             const cdrPath = path.join(job.outputDir, "cdr", `R-${base}.xml`);
@@ -716,6 +721,7 @@ async function runJob(job, credentials, options) {
 
     // SIRE/consultacpe responde lento (~10 s por archivo); se procesan varios
     // comprobantes en paralelo para que 100 compras no tarden una hora.
+    // Las boletas se consultan una por una (1 a 1) para evitar rechazos de SUNAT.
     const concurrency = options.sire
       ? Math.min(Math.max(Number(process.env.SUNAT_CONCURRENCY || 2), 1), 5)
       : 1;
@@ -740,12 +746,12 @@ async function runJob(job, credentials, options) {
         job.message = `${job.processed} de ${job.total} comprobante(s) procesado(s)...`;
       }
 
-      await sleep(options.sire ? 800 : 300);
+      await sleep(options.sire || options.cpe ? 800 : 300);
     }
 
     // SIRE/consultacpe devuelve 500 intermitentes. Se reintentan una vez, de
     // forma secuencial, solo los comprobantes que quedaron con error.
-    if (options.sire && !job.cancelled) {
+    if ((options.sire || options.cpe) && !job.cancelled) {
       const failed = processed.filter((item) => item.record.error);
 
       if (failed.length > 0) {
