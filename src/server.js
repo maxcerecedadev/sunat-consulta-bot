@@ -588,6 +588,7 @@ async function runJob(job, credentials, options) {
     sire: options.sire,
     headless: options.headless,
     statePath: path.join(DATA_DIR, ".session", `${credentials.ruc}.json`),
+    dataDir: DATA_DIR,
     log: (message) => {
       job.logs.push({ at: new Date().toISOString(), message });
       if (job.logs.length > 200) job.logs.shift();
