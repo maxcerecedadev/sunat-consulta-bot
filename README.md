@@ -152,12 +152,15 @@ output/2026-10-20-22-30-00_tipo10/
 ├── comprobantes.csv    # resumen para Excel
 ├── items.csv           # una fila por ítem
 ├── errores.csv         # comprobantes con error
+├── LEEME.txt           # solo si no hubo archivos o quedaron errores
 ├── xml/                # XML firmado de cada comprobante
 ├── pdf/                # representación impresa
 └── cdr/                # CDR, solo si SUNAT lo incluye
 ```
 
 El JSON es el más completo: incluye emisor, cliente, totales, ítems y rutas de los archivos descargados.
+
+En el historial de la app, cada consulta muestra los archivos descargados (`N archivo(s)`), los errores y los CDR faltantes. Si se ejecutó con **Solo listar (sin XML)**, el estado dice **Solo listado**; si no se descargó ningún archivo, dice **Sin archivos** (o **Error** si además hubo fallos). El botón de carpeta del historial abre la ubicación real de esa consulta.
 
 ## Cómo funciona
 

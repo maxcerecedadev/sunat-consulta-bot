@@ -2603,7 +2603,7 @@ class SunatClient {
             .trim()
             .slice(0, 300);
 
-          if (response.status() === 401 && attempt === 0) {
+          if (response.status() === 401) {
             this.menuTokens.consultacpe = null;
             token = await this.consultacpeToken();
             continue;
@@ -2690,58 +2690,84 @@ class SunatClient {
   }
 
   async descargarCpe(invoice, formato = "xml") {
+    let triedSeeSol = false;
+
+    // SEE-SOL es el respaldo cuando consultacpe falla. Si el respaldo también
+    // falla, no se deja activo para el resto de la corrida: un error puntual
+    // no debe impedir que los siguientes comprobantes se intenten de nuevo
+    // por consultacpe.
     if (invoice.cpe && this.useSeeSolBoletas) {
-      return this.descargarSeeSol(invoice, formato);
+      triedSeeSol = true;
+      try {
+        return await this.descargarSeeSol(invoice, formato);
+      } catch (error) {
+        this.useSeeSolBoletas = false;
+        this.seeSolBoletasReady = false;
+        this.log(
+          `SEE-SOL falló (${error.message}); se reintenta por consultacpe...`,
+        );
+      }
     }
 
     try {
       return await this.withRetry(async () => {
-      if (formato === "pdf") {
-        const zip = new AdmZip(await this.descargarConsultacpe(invoice, "/01"));
-        const entry = zip.getEntries().find((item) => /\.pdf$/i.test(item.entryName));
-        if (!entry) throw new Error("SUNAT no devolvió el PDF del comprobante.");
-        return { formato, content: entry.getData(), mime: "application/pdf" };
-      }
+        if (formato === "pdf") {
+          const zip = new AdmZip(await this.descargarConsultacpe(invoice, "/01"));
+          const entry = zip.getEntries().find((item) => /\.pdf$/i.test(item.entryName));
+          if (!entry) throw new Error("SUNAT no devolvió el PDF del comprobante.");
+          return { formato, content: entry.getData(), mime: "application/pdf" };
+        }
 
-      if (formato === "cdr") {
-        const zip = new AdmZip(await this.descargarConsultacpe(invoice, "/03"));
-        const entry = zip
-          .getEntries()
-          .find((item) => /^R-.*\.xml$/i.test(path.basename(item.entryName)));
-        if (!entry) throw new Error("SUNAT no devolvió el CDR del comprobante.");
+        if (formato === "cdr") {
+          const zip = new AdmZip(await this.descargarConsultacpe(invoice, "/03"));
+          const entry = zip
+            .getEntries()
+            .find((item) => /^R-.*\.xml$/i.test(path.basename(item.entryName)));
+          if (!entry) throw new Error("SUNAT no devolvió el CDR del comprobante.");
+          return {
+            formato,
+            content: entry.getData(),
+            mime: "application/xml",
+            filename: path.basename(entry.entryName),
+          };
+        }
+
+        const zip = new AdmZip(await this.descargarConsultacpe(invoice, "/02"));
+        const entries = zip.getEntries().filter((item) => /\.xml$/i.test(item.entryName));
+        const cdrEntry = entries.find((item) => /^R-/i.test(path.basename(item.entryName)));
+        const xmlEntry = entries.find((item) => !/^R-/i.test(path.basename(item.entryName)));
+
+        if (!xmlEntry) throw new Error("El ZIP no contiene el XML del comprobante.");
+
         return {
-          formato,
-          content: entry.getData(),
+          formato: "xml",
+          content: xmlEntry.getData(),
           mime: "application/xml",
-          filename: path.basename(entry.entryName),
+          filename: path.basename(xmlEntry.entryName),
+          cdr: cdrEntry ? cdrEntry.getData().toString("utf8") : null,
+          cdrName: cdrEntry ? path.basename(cdrEntry.entryName) : null,
         };
-      }
-
-      const zip = new AdmZip(await this.descargarConsultacpe(invoice, "/02"));
-      const entries = zip.getEntries().filter((item) => /\.xml$/i.test(item.entryName));
-      const cdrEntry = entries.find((item) => /^R-/i.test(path.basename(item.entryName)));
-      const xmlEntry = entries.find((item) => !/^R-/i.test(path.basename(item.entryName)));
-
-      if (!xmlEntry) throw new Error("El ZIP no contiene el XML del comprobante.");
-
-      return {
-        formato: "xml",
-        content: xmlEntry.getData(),
-        mime: "application/xml",
-        filename: path.basename(xmlEntry.entryName),
-        cdr: cdrEntry ? cdrEntry.getData().toString("utf8") : null,
-        cdrName: cdrEntry ? path.basename(cdrEntry.entryName) : null,
-      };
       });
     } catch (error) {
       if (!invoice.cpe) throw error;
+
+      if (triedSeeSol) {
+        throw new Error(`${error.message} | SEE-SOL: también falló.`);
+      }
 
       this.log(
         `La consulta individual del comprobante falló (${error.message}); ` +
           "se usará SEE-SOL de boletas...",
       );
       this.useSeeSolBoletas = true;
-      return this.descargarSeeSol(invoice, formato);
+
+      try {
+        return await this.descargarSeeSol(invoice, formato);
+      } catch (fallbackError) {
+        this.useSeeSolBoletas = false;
+        this.seeSolBoletasReady = false;
+        throw new Error(`${error.message} | SEE-SOL: ${fallbackError.message}`);
+      }
     }
   }
 

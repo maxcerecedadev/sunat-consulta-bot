@@ -24,6 +24,60 @@ function writeCsv(file, rows, columns) {
 }
 
 /**
+ * Resume cuántos archivos se descargaron realmente y cuántos comprobantes
+ * quedaron con error. Sirve para que el historial no muestre "Completada"
+ * cuando en realidad no se guardó ningún XML/PDF/CDR.
+ */
+function summarizeJob(job, options = {}) {
+  const invoices = Array.isArray(job?.invoices) ? job.invoices : [];
+  const soloListar = Boolean(job?.options?.soloListar);
+  // En facturas emitidas el CDR solo viene si está dentro del ZIP; no se
+  // intenta por separado. Solo se reporta como faltante cuando el flujo sí lo
+  // busca (boletas emitidas y comprobantes recibidos).
+  const intentaCdr = Boolean(job?.options?.cpe || job?.options?.sire);
+  const fileExists =
+    typeof options.fileExists === "function" ? options.fileExists : null;
+  const hasFile = (value) =>
+    Boolean(value) && (!fileExists || fileExists(String(value)));
+  const stats = {
+    soloListar,
+    total: invoices.length,
+    withFiles: 0,
+    xml: 0,
+    pdf: 0,
+    cdr: 0,
+    files: 0,
+    errors: 0,
+    sinArchivos: 0,
+    cdrFaltantes: 0,
+  };
+
+  for (const invoice of invoices) {
+    const files = invoice?.files || {};
+    const xml = hasFile(files.xml);
+    const pdf = hasFile(files.pdf);
+    const cdr = hasFile(files.cdr);
+    const count = (xml ? 1 : 0) + (pdf ? 1 : 0) + (cdr ? 1 : 0);
+
+    if (xml) stats.xml += 1;
+    if (pdf) stats.pdf += 1;
+    if (cdr) stats.cdr += 1;
+    stats.files += count;
+
+    if (count > 0) {
+      stats.withFiles += 1;
+    } else if (!soloListar) {
+      stats.sinArchivos += 1;
+    }
+
+    if (invoice?.error) stats.errors += 1;
+    if (!cdr && !soloListar && intentaCdr) stats.cdrFaltantes += 1;
+  }
+
+  return stats;
+}
+
+/**
  * Convierte el resultado de la corrida en filas planas para CSV.
  */
 function buildRows(results) {
@@ -113,6 +167,7 @@ const ITEM_COLUMNS = [
 module.exports = {
   writeJson,
   writeCsv,
+  summarizeJob,
   buildRows,
   VOUCHER_COLUMNS,
   ITEM_COLUMNS,

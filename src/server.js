@@ -6,7 +6,7 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { exec } = require("child_process");
+const { exec, execFile } = require("child_process");
 const { ZipArchive } = require("archiver");
 const {
   SunatClient,
@@ -39,6 +39,7 @@ const { whatsapp } = require("./whatsapp-baileys");
 const {
   writeJson,
   writeCsv,
+  summarizeJob,
   buildRows,
   VOUCHER_COLUMNS,
   ITEM_COLUMNS,
@@ -58,6 +59,42 @@ app.use(express.static(UI_DIR));
 const jobs = new Map();
 const clients = new Map();
 const buzonJobs = new Map();
+
+function openFolder(dir) {
+  let child;
+
+  try {
+    if (process.platform === "win32") {
+      child = execFile("explorer.exe", [dir]);
+    } else if (process.platform === "darwin") {
+      child = execFile("open", [dir]);
+    } else {
+      child = execFile("xdg-open", [dir]);
+    }
+  } catch {
+    return;
+  }
+
+  // explorer.exe devuelve código 1 aunque la carpeta se abra; el error no es
+  // relevante para la UI. Solo se evita que el proceso quede colgado.
+  child.on("error", () => undefined);
+  child.unref?.();
+}
+
+/**
+ * Calcula el resumen de la consulta comprobando que los archivos existan
+ * realmente en disco. Así el historial no muestra archivos que se borraron
+ * o que quedaron registrados en una ruta distinta.
+ */
+function jobStats(job) {
+  const dir = job?.outputDir;
+  return summarizeJob(job, {
+    fileExists: dir
+      ? (relative) => fs.existsSync(path.join(dir, relative))
+      : undefined,
+  });
+}
+
 
 app.get("/api/tipos", (_req, res) => {
   res.json(TIPOS);
@@ -417,18 +454,23 @@ app.get("/api/history", (req, res) => {
   const page = Math.min(requestedPage, totalPages);
   const start = (page - 1) * pageSize;
 
-  const items = all.slice(start, start + pageSize).map((job) => ({
-    id: job.id,
-    createdAt: job.createdAt,
-    status: job.status,
-    message: job.message,
-    total: job.total,
-    processed: job.processed,
-    options: job.options,
-    hasOutput:
-      job.hasOutput ??
-      fs.existsSync(path.join(job.outputDir || "", "comprobantes.csv")),
-  }));
+  const items = all.slice(start, start + pageSize).map((job) => {
+    const stats = jobStats(job);
+    return {
+      id: job.id,
+      createdAt: job.createdAt,
+      status: job.status,
+      message: job.message,
+      total: job.total,
+      processed: job.processed,
+      options: job.options,
+      stats,
+      hasFiles: stats.files > 0,
+      hasOutput:
+        job.hasOutput ??
+        fs.existsSync(path.join(job.outputDir || "", "comprobantes.csv")),
+    };
+  });
 
   res.json({ items, total, page, pageSize, totalPages });
 });
@@ -461,9 +503,33 @@ app.get("/api/jobs/:id/zip", (req, res) => {
   });
 });
 
+app.post("/api/jobs/:id/open-folder", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job || !job.outputDir) {
+    return res.status(404).json({ error: "Consulta no encontrada." });
+  }
+
+  const root = path.resolve(OUTPUT_ROOT);
+  const dir = path.resolve(job.outputDir);
+  const relative = path.relative(root, dir);
+
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    return res.status(400).json({ error: "Carpeta de la consulta no válida." });
+  }
+
+  if (!fs.existsSync(dir)) {
+    return res.status(404).json({ error: "La carpeta de la consulta ya no existe." });
+  }
+
+  openFolder(dir);
+  res.json({ ok: true, path: dir });
+});
+
 app.get("/api/jobs/:id", (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) return res.status(404).json({ error: "Consulta no encontrada." });
+
+  const stats = jobStats(job);
 
   res.json({
     id: job.id,
@@ -476,6 +542,8 @@ app.get("/api/jobs/:id", (req, res) => {
     invoices: job.invoices,
     logs: job.logs.slice(-40),
     options: job.options,
+    stats,
+    hasFiles: stats.files > 0,
     createdAt: job.createdAt,
     hasOutput: fs.existsSync(path.join(job.outputDir, "comprobantes.csv")),
   });
@@ -619,6 +687,7 @@ async function runJob(job, credentials, options) {
 
     if (invoices.length === 0) {
       job.status = "done";
+      job.stats = jobStats(job);
       writeOutputs(job);
       return;
     }
@@ -774,13 +843,42 @@ async function runJob(job, credentials, options) {
       }
     }
 
-    const errorCount = job.invoices.filter((record) => record.error).length;
-    job.status = job.cancelled ? "cancelled" : "done";
-    job.message = job.cancelled
-      ? "Consulta cancelada."
-      : errorCount > 0
-        ? `Consulta completada con ${errorCount} comprobante(s) con error.`
-        : "Consulta completada.";
+    const stats = jobStats(job);
+    job.stats = stats;
+    const errorCount = stats.errors;
+    const sinArchivos =
+      !options.soloListar && job.invoices.length > 0 && stats.withFiles === 0;
+
+    if (job.cancelled) {
+      job.status = "cancelled";
+      job.message = "Consulta cancelada.";
+    } else if (sinArchivos) {
+      const firstError = job.invoices.find((record) => record.error)?.error;
+      job.status = "error";
+      job.error = [
+        "No se descargó ningún archivo XML, PDF ni CDR.",
+        firstError ? `Primer error: ${firstError}` : "",
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .slice(0, 600);
+      job.message =
+        errorCount > 0
+          ? `No se descargó ningún archivo: ${errorCount} comprobante(s) con error.`
+          : "No se descargó ningún archivo; revisa el detalle de la consulta.";
+    } else if (options.soloListar) {
+      job.status = "done";
+      job.message =
+        `Consulta completada en modo solo listado: ${job.invoices.length} ` +
+        "comprobante(s) sin XML/PDF/CDR.";
+    } else {
+      job.status = "done";
+      job.message =
+        errorCount > 0
+          ? `Consulta completada con ${errorCount} comprobante(s) con error; ` +
+            `${stats.files} archivo(s) descargado(s).`
+          : `Consulta completada: ${stats.files} archivo(s) descargado(s).`;
+    }
     writeOutputs(job);
   } catch (error) {
     if (job.cancelled) {
@@ -799,6 +897,9 @@ async function runJob(job, credentials, options) {
 }
 
 function writeOutputs(job) {
+  const stats = jobStats(job);
+  job.stats = stats;
+
   const results = job.invoices.map((record) => ({
     invoice: record,
     detail: record.detail,
@@ -820,6 +921,7 @@ function writeOutputs(job) {
       hasta: job.options.hasta,
       generated_at: new Date().toISOString(),
       cancelled: job.cancelled,
+      stats,
     },
     vouchers: job.invoices,
   });
@@ -840,7 +942,57 @@ function writeOutputs(job) {
     ["serie", "numero", "tipo", "etapa", "error"],
   );
 
+  writeJobReadme(job, stats);
   writeJobFile(job);
+}
+
+/**
+ * Deja una nota visible dentro de la carpeta cuando no hay XML/PDF/CDR o
+ * cuando hubo errores, para que no parezca que la consulta "se perdió".
+ */
+function writeJobReadme(job, stats) {
+  if (!job.outputDir) return;
+
+  const lines = [];
+
+  if (stats.soloListar) {
+    lines.push("Esta consulta se ejecutó en modo \"Solo listar (sin XML)\".");
+    lines.push("Por eso xml/, pdf/ y cdr/ no contienen archivos.");
+    lines.push(
+      "Vuelve a ejecutar la consulta sin marcar esa opción para descargar los comprobantes.",
+    );
+  } else if (job.invoices.length > 0 && stats.withFiles === 0) {
+    lines.push("No se descargó ningún archivo XML, PDF ni CDR.");
+    const firstError = job.invoices.find((record) => record.error)?.error;
+    if (firstError) lines.push(`Primer error: ${firstError}`);
+    lines.push("Revisa errores.csv o el detalle de la consulta en la aplicación.");
+  } else if (stats.errors > 0 || stats.cdrFaltantes > 0) {
+    lines.push(
+      `Archivos descargados: XML ${stats.xml}, PDF ${stats.pdf}, CDR ${stats.cdr}.`,
+    );
+    if (stats.errors > 0) {
+      lines.push(
+        `Comprobantes con error: ${stats.errors}. Revisa errores.csv para el detalle.`,
+      );
+    }
+    if (stats.cdrFaltantes > 0) {
+      lines.push(
+        `Comprobantes sin CDR: ${stats.cdrFaltantes}. SUNAT no devolvió el CDR de esos comprobantes.`,
+      );
+    }
+  } else {
+    return;
+  }
+
+  try {
+    fs.writeFileSync(
+      path.join(job.outputDir, "LEEME.txt"),
+      `${lines.join("\n")}\n`,
+      "utf8",
+    );
+  } catch (error) {
+    console.error("No se pudo escribir LEEME.txt:", error.message);
+  }
 }
 
 function writeJobFile(job) {
@@ -859,6 +1011,7 @@ function writeJobFile(job) {
       invoices: job.invoices,
       logs: job.logs.slice(-100),
       options: job.options,
+      stats: job.stats || null,
       createdAt: job.createdAt,
       hasOutput: fs.existsSync(path.join(job.outputDir, "comprobantes.csv")),
     });

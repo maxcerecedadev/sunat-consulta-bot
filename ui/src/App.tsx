@@ -11,6 +11,7 @@ import {
   EyeOff,
   FileCode2,
   FileText,
+  FolderOpen,
   Loader2,
   RefreshCcw,
   Search,
@@ -110,6 +111,19 @@ interface Invoice {
   error: string | null;
 }
 
+interface JobStats {
+  soloListar: boolean;
+  total: number;
+  withFiles: number;
+  xml: number;
+  pdf: number;
+  cdr: number;
+  files: number;
+  errors: number;
+  sinArchivos: number;
+  cdrFaltantes: number;
+}
+
 interface Job {
   id: string;
   status: string;
@@ -131,6 +145,8 @@ interface Job {
     descargarXml: boolean;
     descargarPdf: boolean;
   };
+  stats?: JobStats;
+  hasFiles?: boolean;
   createdAt: string;
   hasOutput: boolean;
 }
@@ -143,6 +159,8 @@ interface HistoryItem {
   total: number;
   processed: number;
   options: Job["options"];
+  stats?: JobStats;
+  hasFiles?: boolean;
   hasOutput: boolean;
 }
 
@@ -154,7 +172,6 @@ interface Prefs {
   documento?: string;
   tipo?: string;
   pdf?: boolean;
-  solo?: boolean;
   max?: string;
 }
 
@@ -261,7 +278,10 @@ export default function App() {
   const [tipo, setTipo] = useState(prefs.tipo ?? "10");
   const [range, setRange] = useState<DateRange>(initialRange);
   const [downloadPdf, setDownloadPdf] = useState(prefs.pdf !== false);
-  const [soloListar, setSoloListar] = useState(Boolean(prefs.solo));
+  // "Solo listar" es una opción de una sola corrida: si se guardara, una
+  // consulta posterior podría terminar sin XML/PDF/CDR sin que el usuario lo
+  // note. Siempre se inicia desmarcada.
+  const [soloListar, setSoloListar] = useState(false);
   const [visible, setVisible] = useState(false);
   const [max, setMax] = useState(prefs.max ?? "");
 
@@ -473,7 +493,6 @@ export default function App() {
         documento: payload.documento,
         tipo: payload.tipo,
         pdf: payload.descargarPdf,
-        solo: payload.soloListar,
         max: max || undefined,
       }),
     );
@@ -544,21 +563,77 @@ export default function App() {
       : label;
   };
 
-  const historyStatusLabel = (status: string) =>
-    status === "done"
-      ? "Completada"
-      : status === "error"
-        ? "Error"
-        : status === "cancelled"
-          ? "Cancelada"
-          : "En proceso";
+  const historyStatus = (item: HistoryItem) => {
+    if (item.status === "error") {
+      return {
+        label: "Error",
+        className: "border-destructive/30 bg-destructive/10 text-destructive",
+      };
+    }
 
-  const historyStatusClass = (status: string) =>
-    status === "done"
-      ? "border-success/30 bg-success/10 text-success"
-      : status === "error"
-        ? "border-destructive/30 bg-destructive/10 text-destructive"
-        : "";
+    if (item.status === "cancelled") {
+      return {
+        label: "Cancelada",
+        className: "border-border/70 bg-muted/40 text-muted-foreground",
+      };
+    }
+
+    if (["queued", "login", "listing", "processing"].includes(item.status)) {
+      return { label: "En proceso", className: "" };
+    }
+
+    if (item.stats?.soloListar) {
+      return {
+        label: "Solo listado",
+        className: "border-border/70 bg-muted/40 text-muted-foreground",
+      };
+    }
+
+    if (item.stats && item.stats.total === 0) {
+      return {
+        label: "Sin comprobantes",
+        className: "border-border/70 bg-muted/40 text-muted-foreground",
+      };
+    }
+
+    if (item.stats && item.stats.withFiles === 0) {
+      return {
+        label: "Sin archivos",
+        className: "border-destructive/30 bg-destructive/10 text-destructive",
+      };
+    }
+
+    if (item.stats && item.stats.errors > 0) {
+      return {
+        label: item.stats.withFiles > 0 ? "Con errores" : "Error",
+        className: "border-destructive/30 bg-destructive/10 text-destructive",
+      };
+    }
+
+    return {
+      label: "Completada",
+      className: "border-success/30 bg-success/10 text-success",
+    };
+  };
+
+  const openJobFolder = async (id: string) => {
+    try {
+      const response = await fetch(
+        `/api/jobs/${encodeURIComponent(id)}/open-folder`,
+        { method: "POST" },
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || "No se pudo abrir la carpeta de la consulta.");
+      }
+    } catch (openError) {
+      setError(
+        openError instanceof Error
+          ? openError.message
+          : "No se pudo abrir la carpeta de la consulta.",
+      );
+    }
+  };
 
   return (
     <div className="min-h-screen">
@@ -795,7 +870,26 @@ export default function App() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {history.map((item) => (
+                  {history.map((item) => {
+                    const status = historyStatus(item);
+                    const stats = item.stats;
+                    const filesSummary = stats
+                      ? stats.total === 0
+                        ? "Sin comprobantes"
+                        : stats.soloListar
+                          ? "Solo listado"
+                          : [
+                              `${stats.files} archivo(s)`,
+                              stats.errors > 0 ? `${stats.errors} error(es)` : "",
+                              stats.cdrFaltantes > 0
+                                ? `${stats.cdrFaltantes} sin CDR`
+                                : "",
+                            ]
+                              .filter(Boolean)
+                              .join(" · ")
+                      : "";
+
+                    return (
                     <TableRow key={item.id}>
                       <TableCell>
                         {new Date(item.createdAt).toLocaleString("es-PE", {
@@ -809,14 +903,22 @@ export default function App() {
                         {item.options?.desde || "—"} → {item.options?.hasta || "—"}
                       </TableCell>
                       <TableCell>
-                        {item.processed}/{item.total}
+                        <div>
+                          {item.processed}/{item.total}
+                        </div>
+                        {filesSummary && (
+                          <div className="text-[11.5px] text-muted-foreground">
+                            {filesSummary}
+                          </div>
+                        )}
                       </TableCell>
                       <TableCell>
                         <Badge
                           variant="outline"
-                          className={historyStatusClass(item.status)}
+                          className={status.className}
+                          title={item.message}
                         >
-                          {historyStatusLabel(item.status)}
+                          {status.label}
                         </Badge>
                       </TableCell>
                       <TableCell>
@@ -832,6 +934,14 @@ export default function App() {
                             }}
                           >
                             <Eye className="size-4" />
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            title="Abrir carpeta de la consulta"
+                            onClick={() => void openJobFolder(item.id)}
+                          >
+                            <FolderOpen className="size-4" />
                           </Button>
                           {["queued", "login", "listing", "processing"].includes(
                             item.status,
@@ -865,7 +975,8 @@ export default function App() {
                         </div>
                       </TableCell>
                     </TableRow>
-                  ))}
+                    );
+                  })}
                 </TableBody>
               </Table>
               <div className="flex flex-wrap items-center justify-between gap-3 border-t px-4 py-3 text-sm">
@@ -1084,6 +1195,18 @@ function ResultsCard({
   onDetail: (invoice: Invoice) => void;
 }) {
   const isReceived = ["11", "14", "16"].includes(job.options.tipo);
+  const stats = job.stats;
+  const errorCount = stats?.errors ?? job.invoices.filter((invoice) => invoice.error).length;
+
+  const warning = stats?.soloListar
+    ? "Esta consulta se ejecutó en modo Solo listar: no se descargaron XML, PDF ni CDR."
+    : stats && job.invoices.length > 0 && stats.withFiles === 0
+      ? "No se descargó ningún archivo. Revisa los errores de cada comprobante o descarga errores.csv."
+      : stats && errorCount > 0
+        ? `${errorCount} comprobante(s) quedaron con error de descarga. Revisa el detalle o descarga errores.csv.`
+        : stats && stats.cdrFaltantes > 0
+          ? `SUNAT no devolvió el CDR de ${stats.cdrFaltantes} comprobante(s).`
+          : "";
 
   const exports = job.hasOutput ? (
     <div className="flex flex-wrap gap-4 text-sm">
@@ -1101,6 +1224,15 @@ function ResultsCard({
       >
         Descargar JSON
       </a>
+      {errorCount > 0 && (
+        <a
+          className="font-semibold text-destructive hover:underline"
+          href={exportUrl(job.id, "errores.csv")}
+          download
+        >
+          Descargar errores
+        </a>
+      )}
       <a
         className="font-semibold text-primary hover:underline"
         href={`/api/jobs/${job.id}/zip`}
@@ -1116,11 +1248,22 @@ function ResultsCard({
       <CardHeader className="flex flex-row items-start justify-between gap-4 border-b">
         <div>
           <CardTitle>Resultados</CardTitle>
-          <CardDescription>{job.invoices.length} comprobante(s) encontrado(s)</CardDescription>
+          <CardDescription>
+            {job.invoices.length} comprobante(s) encontrado(s)
+            {stats
+              ? ` · XML ${stats.xml} · PDF ${stats.pdf} · CDR ${stats.cdr}`
+              : ""}
+          </CardDescription>
         </div>
         {exports}
       </CardHeader>
       <CardContent className="p-0">
+        {warning && (
+          <div className="flex items-start gap-3 border-b border-amber-500/25 bg-amber-500/5 px-4 py-3 text-sm text-amber-700 dark:text-amber-400">
+            <AlertCircle className="mt-0.5 size-4 shrink-0" />
+            <span className="min-w-0 flex-1 break-words">{warning}</span>
+          </div>
+        )}
         <Table>
           <TableHeader>
             <TableRow>
@@ -1193,6 +1336,14 @@ function ResultsCard({
                     {invoice.detail && (
                       <span className="text-[11.5px] text-muted-foreground">
                         {invoice.detail.items.length} ítem(s)
+                      </span>
+                    )}
+                    {invoice.error && (
+                      <span
+                        className="block max-w-56 truncate text-[11.5px] text-destructive"
+                        title={invoice.error}
+                      >
+                        Error: {invoice.error}
                       </span>
                     )}
                   </TableCell>
