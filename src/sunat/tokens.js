@@ -116,6 +116,16 @@ module.exports = {
 
     const deadline = Date.now() + 30000;
     while (Date.now() < deadline) {
+      // Para consultacpe se prefiere el token que el SPA guarda en
+      // sessionStorage. El token de la URL puede ser de una sesión anterior.
+      if (match === "consultacpe") {
+        const sessionToken = await this.readConsultacpeSessionToken(page);
+        if (sessionToken) {
+          await this.restoreMenuView(page);
+          return sessionToken;
+        }
+      }
+
       for (const frame of page.frames()) {
         const url = frame.url();
         if (!url.includes("token=") || !url.includes(match)) continue;
@@ -123,16 +133,6 @@ module.exports = {
         if (tokenMatch) {
           if (match === "consultacpe") await this.restoreMenuView(page);
           return decodeURIComponent(tokenMatch[1]);
-        }
-      }
-
-      // El SPA nuevo de consulta CPE guarda el token en sessionStorage, no en
-      // la URL. Leerlo ahí evita usar un token viejo que el API rechaza.
-      if (match === "consultacpe") {
-        const sessionToken = await this.readConsultacpeSessionToken(page);
-        if (sessionToken) {
-          await this.restoreMenuView(page);
-          return sessionToken;
         }
       }
 

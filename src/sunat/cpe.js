@@ -129,7 +129,9 @@ module.exports = {
           if (response.status() >= 500 || response.status() === 429) {
             const wait = [5000, 10000, 20000, 30000, 45000, 60000][attempt] || 60000;
             this.log(
-              `SUNAT respondió ${response.status()}; reintentando en ${Math.round(wait / 1000)}s...`,
+              `SUNAT respondió ${response.status()}${
+                message ? `: ${message.slice(0, 160)}` : ""
+              }; reintentando en ${Math.round(wait / 1000)}s...`,
             );
             await sleep(wait + Math.floor(Math.random() * 2000));
             continue;
@@ -141,9 +143,12 @@ module.exports = {
       }
     }
 
-    // Si el listado vino del módulo de factoring, el archivo se obtiene por
-    // su endpoint binario (ZIP) en lugar de valArchivo.
-    if (invoice.cpe) {
+    // Respaldo: el API individual puede responder 500 para comprobantes
+    // recibidos. El módulo controlcpe entrega el mismo ZIP por otro endpoint.
+    if (invoice.cpe || invoice.sire) {
+      this.log(
+        `Se intenta descargar ${invoice.serie}-${invoice.numero} por controlcpe...`,
+      );
       try {
         return await this.descargarControlcpe(invoice);
       } catch (error) {
@@ -247,7 +252,15 @@ module.exports = {
         };
       });
     } catch (error) {
-      if (!invoice.cpe) throw error;
+      if (!invoice.cpe) {
+        if (invoice.sire && !invoice.emitido) {
+          throw new Error(
+            `${error.message} | Si el comprobante es físico o el proveedor no ` +
+              "lo informó como CPE, SUNAT no tiene XML/PDF disponible.",
+          );
+        }
+        throw error;
+      }
 
       // El módulo SEE-SOL de boletas (ol-ti-itconscpemypebve) fue retirado por
       // SUNAT y ya no existe. Un 404 en el API individual de una boleta
