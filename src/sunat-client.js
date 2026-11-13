@@ -244,6 +244,7 @@ class SunatClient {
     this.context = null;
     this.page = null;
     this.closed = false;
+    this.seeSolActionsLogged = false;
   }
 
   async open() {
@@ -280,6 +281,7 @@ class SunatClient {
     this.allowBuzonDetail = false;
     this.useSeeSolBoletas = false;
     this.seeSolBoletasReady = false;
+    this.seeSolActionsLogged = false;
     this.cpeDownloadPattern = null;
     this.menuTokens = {};
 
@@ -1329,34 +1331,33 @@ class SunatClient {
 
   async waitForConsultaModule(page, menuFrame, timeoutMs = 45000) {
     const started = Date.now();
+    const isModuleUrl = (value) =>
+      /^https?:\/\/ww1\.sunat\.gob\.pe/i.test(value) &&
+      !/\/time\/gettime\.pl/i.test(value) &&
+      /consultar|itcons|conscpe|bve/i.test(value);
 
     while (Date.now() - started < timeoutMs) {
-      const iframeCount = await menuFrame
-        .locator("iframe#iframeApplication")
-        .count()
-        .catch(() => 0);
-      if (iframeCount > 0) {
-        return { locator: menuFrame.frameLocator("iframe#iframeApplication") };
-      }
-
-      const moduleFrame = page.frames().find(
-        (frame) =>
-          frame !== page.mainFrame() &&
-          /^https?:\/\/ww1\.sunat\.gob\.pe/i.test(frame.url()) &&
-          /consultar|itcons|conscpe/i.test(frame.url()),
-      );
+      const moduleFrame = page
+        .frames()
+        .find((frame) => frame !== page.mainFrame() && isModuleUrl(frame.url()));
       if (moduleFrame) return { frame: moduleFrame };
 
       const otherPage = page
         .context()
         .pages()
-        .find(
-          (candidate) =>
-            candidate !== page &&
-            /^https?:\/\/ww1\.sunat\.gob\.pe/i.test(candidate.url()) &&
-            /consultar|itcons|conscpe/i.test(candidate.url()),
-        );
+        .find((candidate) => candidate !== page && isModuleUrl(candidate.url()));
       if (otherPage) return { page: otherPage };
+
+      // El iframe del menú existe desde antes de abrir el módulo y al inicio
+      // apunta a time/gettime.pl. Solo se usa como último recurso, cuando ya
+      // se esperó lo suficiente para que cargue la URL real.
+      const iframeCount = await menuFrame
+        .locator("iframe#iframeApplication")
+        .count()
+        .catch(() => 0);
+      if (iframeCount > 0 && Date.now() - started > 20000) {
+        return { locator: menuFrame.frameLocator("iframe#iframeApplication") };
+      }
 
       await page.waitForTimeout(500);
     }
@@ -1631,6 +1632,7 @@ class SunatClient {
       this.consultaUrl = `${url.origin}${url.pathname}`;
       this.consultaReferer = this.consultaUrl;
       this.log(`Módulo SUNAT: ${this.consultaUrl}`);
+      await page.waitForTimeout(1500);
       return;
     }
 
@@ -1639,6 +1641,8 @@ class SunatClient {
       this.consultaUrl = `${url.origin}${url.pathname}`;
       this.consultaReferer = this.consultaUrl;
       this.log(`Módulo SUNAT: ${this.consultaUrl}`);
+      // La URL cambia antes de que el módulo termine de inicializar su sesión.
+      await page.waitForTimeout(1500);
       return;
     }
 
@@ -1673,18 +1677,27 @@ class SunatClient {
    * adivinar el endpoint de boletas, se toma la URL real del iframe que abrió
    * el menú de SUNAT (la sesión ya está autenticada).
    */
-  async captureModuleUrl(page) {
-    for (let attempt = 0; attempt < 24; attempt++) {
-      const frames = page
+  async captureModuleUrl(page, timeoutMs = 30000) {
+    const started = Date.now();
+    let frames = [];
+
+    while (Date.now() - started < timeoutMs) {
+      frames = page
         .frames()
         .filter(
           (frame) =>
             frame !== page.mainFrame() &&
-            /^https?:\/\/ww1\.sunat\.gob\.pe/i.test(frame.url()),
+            /^https?:\/\/ww1\.sunat\.gob\.pe/i.test(frame.url()) &&
+            // Al abrir el módulo, el iframe pasa primero por este servicio de
+            // hora. Si se captura esa URL el POST de descarga termina en 404.
+            !/\/time\/gettime\.pl/i.test(frame.url()),
         );
 
       const moduleFrame =
-        frames.find((frame) => /consultar|itcons/i.test(frame.url())) || frames[0];
+        frames.find((frame) => /itconsc|consultar|conscpe/i.test(frame.url())) ||
+        (this.documento === "boleta"
+          ? frames.find((frame) => /bve|boleta/i.test(frame.url()))
+          : null);
 
       if (moduleFrame) {
         try {
@@ -1692,7 +1705,7 @@ class SunatClient {
           this.consultaUrl = `${url.origin}${url.pathname}`;
           this.consultaReferer = this.consultaUrl;
           this.log(`Módulo SUNAT: ${this.consultaUrl}`);
-          return;
+          return true;
         } catch {
           // La URL del iframe aún no es válida; se reintenta.
         }
@@ -1701,7 +1714,11 @@ class SunatClient {
       await page.waitForTimeout(500);
     }
 
-    this.log(`No se detectó la URL del módulo; se usa ${this.consultaUrl}`);
+    this.log(
+      `No se detectó la URL del módulo; se usa ${this.consultaUrl}. ` +
+        `Frames: ${frames.map((frame) => frame.url()).join(" | ") || "(ninguno)"}`,
+    );
+    return false;
   }
 
   jsonHeaders(token) {
@@ -2814,8 +2831,37 @@ class SunatClient {
     // El módulo de boletas tiene su propia URL. Si el menú no la capturó,
     // se usa la URL directa para que el POST de descarga no termine en 404.
     if (!/itconscpemypebve/i.test(this.consultaUrl || "")) {
+      this.log(
+        `No se capturó la URL del módulo de boletas (actual: ${this.consultaUrl}); ` +
+          "se usa la URL directa.",
+      );
       this.consultaUrl = "https://ww1.sunat.gob.pe/ol-ti-itconscpemypebve/consultar.do";
       this.consultaReferer = this.consultaUrl;
+    }
+
+    this.log(`Módulo de boletas: ${this.consultaUrl}`);
+
+    // Diagnóstico: el módulo de boletas es una aplicación distinta a la de
+    // facturas. Se registran las acciones que expone para confirmar cuáles
+    // sirven para descargar XML/PDF.
+    try {
+      const moduleFrame = this.page
+        .frames()
+        .find((frame) => /itconscpemypebve/i.test(frame.url()));
+      if (moduleFrame && !this.seeSolActionsLogged) {
+        this.seeSolActionsLogged = true;
+        const html = await moduleFrame.content();
+        const actions = [
+          ...new Set(
+            [...html.matchAll(/action=([A-Za-z0-9_]+)/gi)].map((match) => match[1]),
+          ),
+        ].slice(0, 25);
+        if (actions.length) {
+          this.log(`Acciones del módulo de boletas: ${actions.join(", ")}`);
+        }
+      }
+    } catch {
+      // El diagnóstico no debe impedir la descarga.
     }
 
     this.seeSolBoletasReady = true;
@@ -3000,7 +3046,9 @@ class SunatClient {
           .replace(/\s+/g, " ")
           .trim()
           .slice(0, 300);
-        throw new Error(`No se pudo descargar el XML. ${message || `HTTP ${response.status()}`}`);
+        throw new Error(
+          `No se pudo descargar el XML. ${message || `HTTP ${response.status()}`} (${this.consultaUrl})`,
+        );
       }
 
       if (!body.length || body.subarray(0, 2).toString("latin1") !== "PK") {
@@ -3059,7 +3107,9 @@ class SunatClient {
           .replace(/\s+/g, " ")
           .trim()
           .slice(0, 300);
-        throw new Error(`No se pudo descargar el PDF. ${message || `HTTP ${response.status()}`}`);
+        throw new Error(
+          `No se pudo descargar el PDF. ${message || `HTTP ${response.status()}`} (${this.consultaUrl})`,
+        );
       }
 
       if (!body.length || body.subarray(0, 4).toString("latin1") !== "%PDF") {
