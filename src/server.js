@@ -640,6 +640,12 @@ function sunatDate(value) {
   return value;
 }
 
+function isBrowserClosedError(error) {
+  return /Target page, context or browser has been closed|browser has been closed|Consulta cancelada: la sesión de SUNAT ya está cerrada/i.test(
+    String(error && error.message ? error.message : error),
+  );
+}
+
 async function runJob(job, credentials, options) {
   if (job.cancelled) {
     job.status = "cancelled";
@@ -717,6 +723,7 @@ async function runJob(job, credentials, options) {
         detail: null,
         files: {},
         error: null,
+        permanent: false,
       };
 
       if (!options.soloListar) {
@@ -762,30 +769,36 @@ async function runJob(job, credentials, options) {
             record.files.cdr = `cdr/R-${base}.xml`;
           }
         } catch (error) {
+          if (isBrowserClosedError(error)) throw error;
           record.error = `XML: ${error.message}`;
+          if (error.permanent) record.permanent = true;
         }
 
         // Si el XML falló, el CDR puede seguir disponible por separado.
-        if ((options.sire || options.cpe) && !record.files.cdr) {
+        if ((options.sire || options.cpe) && !record.files.cdr && !record.permanent) {
           try {
             const cdr = await client.descargar(invoice, "cdr");
             const cdrPath = path.join(job.outputDir, "cdr", `R-${base}.xml`);
             fs.writeFileSync(cdrPath, cdr.content);
             record.files.cdr = `cdr/R-${base}.xml`;
           } catch (error) {
+            if (isBrowserClosedError(error)) throw error;
             record.error = [record.error, `CDR: ${error.message}`].filter(Boolean).join(" | ");
+            if (error.permanent) record.permanent = true;
           }
         }
 
         // El PDF se intenta aunque el XML haya fallado.
-        if (options.descargarPdf) {
+        if (options.descargarPdf && !record.permanent) {
           try {
             const pdf = await client.descargar(invoice, "pdf");
             const pdfPath = path.join(job.outputDir, "pdf", `${base}.pdf`);
             fs.writeFileSync(pdfPath, pdf.content);
             record.files.pdf = `pdf/${base}.pdf`;
           } catch (error) {
+            if (isBrowserClosedError(error)) throw error;
             record.error = [record.error, `PDF: ${error.message}`].filter(Boolean).join(" | ");
+            if (error.permanent) record.permanent = true;
           }
         }
       }
@@ -826,7 +839,17 @@ async function runJob(job, credentials, options) {
     // SIRE/consultacpe devuelve 500 intermitentes. Se reintentan una vez, de
     // forma secuencial, solo los comprobantes que quedaron con error.
     if ((options.sire || options.cpe) && !job.cancelled) {
-      const failed = processed.filter((item) => item.record.error);
+      const failed = processed.filter(
+        (item) => item.record.error && !item.record.permanent,
+      );
+      const noRetry = processed.filter((item) => item.record.permanent);
+
+      if (noRetry.length > 0) {
+        client.log(
+          `${noRetry.length} comprobante(s) sin archivo individual en SUNAT; ` +
+            "no se reintentan.",
+        );
+      }
 
       if (failed.length > 0) {
         client.log(`Reintentando ${failed.length} comprobante(s) con error...`);
@@ -858,6 +881,8 @@ async function runJob(job, credentials, options) {
       job.message = "Consulta cancelada.";
     } else if (sinArchivos) {
       const firstError = job.invoices.find((record) => record.error)?.error;
+      const allPermanent =
+        job.invoices.length > 0 && job.invoices.every((record) => record.permanent);
       job.status = "error";
       job.error = [
         "No se descargó ningún archivo XML, PDF ni CDR.",
@@ -866,8 +891,10 @@ async function runJob(job, credentials, options) {
         .filter(Boolean)
         .join(" ")
         .slice(0, 600);
-      job.message =
-        errorCount > 0
+      job.message = allPermanent
+        ? `SUNAT no tiene XML/PDF/CDR individual para ${job.invoices.length} boleta(s); ` +
+          "revisa el detalle (pueden estar informadas por Resumen Diario)."
+        : errorCount > 0
           ? `No se descargó ningún archivo: ${errorCount} comprobante(s) con error.`
           : "No se descargó ningún archivo; revisa el detalle de la consulta.";
     } else if (options.soloListar) {
@@ -888,6 +915,12 @@ async function runJob(job, credentials, options) {
     if (job.cancelled) {
       job.status = "cancelled";
       job.message = "Consulta cancelada.";
+    } else if (isBrowserClosedError(error)) {
+      job.status = "error";
+      job.message = "Se cerró el navegador de SUNAT; la consulta se detuvo.";
+      job.error =
+        "El navegador de SUNAT se cerró durante la consulta. " +
+        "Vuelve a ejecutarla y no cierres la ventana hasta que termine.";
     } else {
       job.status = "error";
       job.error = error.message;

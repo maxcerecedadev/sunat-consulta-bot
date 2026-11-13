@@ -224,8 +224,6 @@ class SunatClient {
     this.buzonFrame = null;
     this.buzonDetailRouteHandler = null;
     this.allowBuzonDetail = false;
-    this.useSeeSolBoletas = false;
-    this.seeSolBoletasReady = false;
     this.cpeDownloadPattern = null;
     this.lastBuzonRequestAt = 0;
     this.headless = options.headless !== false;
@@ -244,7 +242,6 @@ class SunatClient {
     this.context = null;
     this.page = null;
     this.closed = false;
-    this.seeSolActionsLogged = false;
   }
 
   async open() {
@@ -279,9 +276,6 @@ class SunatClient {
     this.buzonFrame = null;
     this.buzonDetailRouteHandler = null;
     this.allowBuzonDetail = false;
-    this.useSeeSolBoletas = false;
-    this.seeSolBoletasReady = false;
-    this.seeSolActionsLogged = false;
     this.cpeDownloadPattern = null;
     this.menuTokens = {};
 
@@ -1801,11 +1795,47 @@ class SunatClient {
         if (tokenMatch) return decodeURIComponent(tokenMatch[1]);
       }
 
+      // El SPA nuevo de consulta CPE guarda el token en sessionStorage, no en
+      // la URL. Leerlo ahí evita usar un token viejo que el API rechaza.
+      if (match === "consultacpe") {
+        const sessionToken = await this.readConsultacpeSessionToken(page);
+        if (sessionToken) return sessionToken;
+      }
+
       if (/loginMenuSol/i.test(page.url())) throw new Error("La sesión SOL expiró.");
       await page.waitForTimeout(500);
     }
 
     throw new Error(`No se pudo obtener el token de SUNAT (${description}).`);
+  }
+
+  async readConsultacpeSessionToken(page) {
+    const targets = [];
+    for (const candidate of page.context().pages()) {
+      if (/e-factura\.sunat\.gob\.pe/i.test(candidate.url())) targets.push(candidate);
+    }
+    for (const frame of page.frames()) {
+      if (/e-factura\.sunat\.gob\.pe/i.test(frame.url())) targets.push(frame);
+    }
+
+    for (const target of targets) {
+      const token = await target
+        .evaluate(() => {
+          try {
+            return (
+              sessionStorage.getItem("SUNAT.token") ||
+              sessionStorage.getItem("token") ||
+              ""
+            );
+          } catch {
+            return "";
+          }
+        })
+        .catch(() => "");
+      if (token) return token;
+    }
+
+    return "";
   }
 
   async consultacpeToken() {
@@ -2597,11 +2627,9 @@ class SunatClient {
         : tiposBase;
 
     let lastError = null;
-    // El sufijo -1/-2 indica si el comprobante se consulta como emisor o
-    // receptor. Las boletas de SIRE Ventas se consultan como emisor (-1).
-    // Se incluye la variante sin sufijo por si SUNAT solo acepta el formato
-    // {RUC}-{TIPO}-{SERIE}-{NUMERO}.
-    const rolesBase = invoice.emitido ? ["-1", "-2", ""] : ["-2", "-1", ""];
+    // El sufijo es codFiltroCpe: 1 = emisor, 2 = receptor. Las boletas de
+    // SIRE Ventas se consultan como emisor.
+    const rolesBase = invoice.emitido ? ["-1", "-2"] : ["-2", "-1"];
     const roles =
       cache && rolesBase.includes(cache.role)
         ? [cache.role, ...rolesBase.filter((role) => role !== cache.role)]
@@ -2729,25 +2757,6 @@ class SunatClient {
       throw new Error("Consulta cancelada: la sesión de SUNAT ya está cerrada.");
     }
 
-    let triedSeeSol = false;
-
-    // SEE-SOL es el respaldo cuando consultacpe falla. Si el respaldo también
-    // falla, no se deja activo para el resto de la corrida: un error puntual
-    // no debe impedir que los siguientes comprobantes se intenten de nuevo
-    // por consultacpe.
-    if (invoice.cpe && this.useSeeSolBoletas) {
-      triedSeeSol = true;
-      try {
-        return await this.descargarSeeSol(invoice, formato);
-      } catch (error) {
-        this.useSeeSolBoletas = false;
-        this.seeSolBoletasReady = false;
-        this.log(
-          `SEE-SOL falló (${error.message}); se reintenta por consultacpe...`,
-        );
-      }
-    }
-
     try {
       return await this.withRetry(async () => {
         if (formato === "pdf") {
@@ -2790,117 +2799,24 @@ class SunatClient {
     } catch (error) {
       if (!invoice.cpe) throw error;
 
-      if (triedSeeSol) {
-        throw new Error(`${error.message} | SEE-SOL: también falló.`);
+      // El módulo SEE-SOL de boletas (ol-ti-itconscpemypebve) fue retirado por
+      // SUNAT y ya no existe. Un 404 en el API individual de una boleta
+      // significa que SUNAT no guarda XML/PDF/CDR por boleta: las boletas se
+      // informan mediante Resumen Diario y solo existe el resumen.
+      const tipo = String(invoice.tipo || "").trim().padStart(2, "0");
+      if (tipo === "03" && /404|resource not found/i.test(error.message)) {
+        const missing = new Error(
+          `SUNAT no tiene XML/PDF/CDR individual disponible para la boleta ` +
+            `${invoice.serie}-${invoice.numero}. Las boletas informadas por ` +
+            `Resumen Diario no se almacenan de forma individual; si se emitió ` +
+            `por SEE-SOL, verifica que esté aceptada en SUNAT.`,
+        );
+        missing.permanent = true;
+        throw missing;
       }
 
-      this.log(
-        `La consulta individual del comprobante falló (${error.message}); ` +
-          "se usará SEE-SOL de boletas...",
-      );
-      this.useSeeSolBoletas = true;
-
-      try {
-        return await this.descargarSeeSol(invoice, formato);
-      } catch (fallbackError) {
-        this.useSeeSolBoletas = false;
-        this.seeSolBoletasReady = false;
-        if (!this.closed) {
-          this.log(`SEE-SOL de boletas también falló: ${fallbackError.message}`);
-        }
-        throw new Error(`${error.message} | SEE-SOL: ${fallbackError.message}`);
-      }
+      throw error;
     }
-  }
-
-  async ensureSeeSolBoletas() {
-    if (this.seeSolBoletasReady) return;
-
-    if (this.closed || !this.page) {
-      throw new Error("Consulta cancelada: la sesión de SUNAT ya está cerrada.");
-    }
-
-    this.log("Abriendo SEE-SOL de boletas para consultar los comprobantes uno por uno...");
-
-    try {
-      await this.openModule(this.page, { navigate: false });
-    } catch (error) {
-      this.log(`No se abrió el menú de boletas: ${error.message}`);
-    }
-
-    // El módulo de boletas tiene su propia URL. Si el menú no la capturó,
-    // se usa la URL directa para que el POST de descarga no termine en 404.
-    if (!/itconscpemypebve/i.test(this.consultaUrl || "")) {
-      this.log(
-        `No se capturó la URL del módulo de boletas (actual: ${this.consultaUrl}); ` +
-          "se usa la URL directa.",
-      );
-      this.consultaUrl = "https://ww1.sunat.gob.pe/ol-ti-itconscpemypebve/consultar.do";
-      this.consultaReferer = this.consultaUrl;
-    }
-
-    this.log(`Módulo de boletas: ${this.consultaUrl}`);
-
-    // Diagnóstico: el módulo de boletas es una aplicación distinta a la de
-    // facturas. Se registran las acciones que expone para confirmar cuáles
-    // sirven para descargar XML/PDF.
-    try {
-      const moduleFrame = this.page
-        .frames()
-        .find((frame) => /itconscpemypebve/i.test(frame.url()));
-      if (moduleFrame && !this.seeSolActionsLogged) {
-        this.seeSolActionsLogged = true;
-        const html = await moduleFrame.content();
-        const actions = [
-          ...new Set(
-            [...html.matchAll(/action=([A-Za-z0-9_]+)/gi)].map((match) => match[1]),
-          ),
-        ].slice(0, 25);
-        if (actions.length) {
-          this.log(`Acciones del módulo de boletas: ${actions.join(", ")}`);
-        }
-      }
-    } catch {
-      // El diagnóstico no debe impedir la descarga.
-    }
-
-    this.seeSolBoletasReady = true;
-  }
-
-  async descargarSeeSol(invoice, formato = "xml") {
-    await this.ensureSeeSolBoletas();
-
-    if (formato === "pdf") {
-      return {
-        formato,
-        content: await this.downloadPdf(invoice),
-        mime: "application/pdf",
-      };
-    }
-
-    const zip = await this.downloadZip(invoice);
-    const files = this.extractFromZip(zip);
-
-    if (formato === "cdr") {
-      if (!files.cdr) {
-        throw new Error("SUNAT no devolvió el CDR de este comprobante.");
-      }
-      return {
-        formato,
-        content: Buffer.from(files.cdr, "utf8"),
-        mime: "application/xml",
-        filename: files.cdrName,
-      };
-    }
-
-    return {
-      formato: "xml",
-      content: Buffer.from(files.xml, "utf8"),
-      mime: "application/xml",
-      filename: files.xmlName,
-      cdr: files.cdr,
-      cdrName: files.cdrName,
-    };
   }
 
   async descargarSire(invoice, formato = "xml") {
