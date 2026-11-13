@@ -243,12 +243,15 @@ class SunatClient {
     this.browser = null;
     this.context = null;
     this.page = null;
+    this.closed = false;
   }
 
   async open() {
     if (!this.ruc || !this.solUser || !this.solPassword) {
       throw new Error("Faltan las credenciales SOL (RUC, usuario y clave).");
     }
+
+    this.closed = false;
 
     this.browser = await chromium.launch({
       headless: this.headless,
@@ -357,6 +360,7 @@ class SunatClient {
   }
 
   async close() {
+    this.closed = true;
     if (this.context) await this.context.close().catch(() => undefined);
     if (this.browser) await this.browser.close().catch(() => undefined);
     this.context = null;
@@ -365,6 +369,13 @@ class SunatClient {
     this.buzonFrame = null;
     this.buzonDetailRouteHandler = null;
     this.allowBuzonDetail = false;
+  }
+
+  ensureActive() {
+    if (this.closed || !this.context) {
+      throw new Error("Consulta cancelada: la sesión de SUNAT ya está cerrada.");
+    }
+    return this.context;
   }
 
   async saveState() {
@@ -2553,9 +2564,13 @@ class SunatClient {
       if (normalized !== String(invoice.numero)) numbers.push(normalized);
     }
 
-    const tiposBase = [String(invoice.tipo)];
-    if (/^0\d$/.test(String(invoice.tipo))) {
-      tiposBase.push(String(Number(invoice.tipo)));
+    // SUNAT identifica el tipo de comprobante con dos dígitos (03 = boleta).
+    // SIRE a veces entrega "3" sin el cero inicial, así que se prueban ambas
+    // variantes empezando por la normalizada.
+    const tipoRaw = String(invoice.tipo).trim();
+    const tiposBase = [];
+    for (const value of [tipoRaw.padStart(2, "0"), tipoRaw]) {
+      if (value && !tiposBase.includes(value)) tiposBase.push(value);
     }
 
     const cache = this.cpeDownloadPattern;
@@ -2567,7 +2582,9 @@ class SunatClient {
     let lastError = null;
     // El sufijo -1/-2 indica si el comprobante se consulta como emisor o
     // receptor. Las boletas de SIRE Ventas se consultan como emisor (-1).
-    const rolesBase = invoice.emitido ? ["-1", "-2", "-0"] : ["-2", "-1", "-0"];
+    // Se incluye la variante sin sufijo por si SUNAT solo acepta el formato
+    // {RUC}-{TIPO}-{SERIE}-{NUMERO}.
+    const rolesBase = invoice.emitido ? ["-1", "-2", ""] : ["-2", "-1", ""];
     const roles =
       cache && rolesBase.includes(cache.role)
         ? [cache.role, ...rolesBase.filter((role) => role !== cache.role)]
@@ -2582,7 +2599,7 @@ class SunatClient {
           // Se procesa 1 a 1, así que basta un desfase corto para no saturar.
           await sleep(200 + Math.floor(Math.random() * 300));
 
-          const response = await this.context.request.get(url, {
+          const response = await this.ensureActive().request.get(url, {
             headers: this.consultacpeHeaders(token),
             timeout: 120000,
           });
@@ -2645,9 +2662,10 @@ class SunatClient {
 
   async descargarControlcpe(invoice) {
     const token = await this.controlcpeToken();
-    const tipos = [String(invoice.tipo)];
-    if (/^0\d$/.test(String(invoice.tipo))) {
-      tipos.push(String(Number(invoice.tipo)));
+    const tipoRaw = String(invoice.tipo).trim();
+    const tipos = [];
+    for (const value of [tipoRaw.padStart(2, "0"), tipoRaw]) {
+      if (value && !tipos.includes(value)) tipos.push(value);
     }
 
     let lastError = null;
@@ -2657,7 +2675,7 @@ class SunatClient {
       for (const tipo of tipos) {
         const base = `${invoice.ruc_emisor}-${tipo}-${invoice.serie}-${invoice.numero}`;
         const id = `${base}${role}`;
-        const response = await this.context.request.get(
+        const response = await this.ensureActive().request.get(
           `${CONTROLCPE_API}/consultaxml/${id}`,
           {
             headers: this.consultacpeHeaders(token),
@@ -2690,6 +2708,10 @@ class SunatClient {
   }
 
   async descargarCpe(invoice, formato = "xml") {
+    if (this.closed) {
+      throw new Error("Consulta cancelada: la sesión de SUNAT ya está cerrada.");
+    }
+
     let triedSeeSol = false;
 
     // SEE-SOL es el respaldo cuando consultacpe falla. Si el respaldo también
@@ -2766,6 +2788,9 @@ class SunatClient {
       } catch (fallbackError) {
         this.useSeeSolBoletas = false;
         this.seeSolBoletasReady = false;
+        if (!this.closed) {
+          this.log(`SEE-SOL de boletas también falló: ${fallbackError.message}`);
+        }
         throw new Error(`${error.message} | SEE-SOL: ${fallbackError.message}`);
       }
     }
@@ -2773,6 +2798,10 @@ class SunatClient {
 
   async ensureSeeSolBoletas() {
     if (this.seeSolBoletasReady) return;
+
+    if (this.closed || !this.page) {
+      throw new Error("Consulta cancelada: la sesión de SUNAT ya está cerrada.");
+    }
 
     this.log("Abriendo SEE-SOL de boletas para consultar los comprobantes uno por uno...");
 
@@ -2836,6 +2865,7 @@ class SunatClient {
     try {
       return await operation();
     } catch (error) {
+      if (this.closed) throw error;
       if (!/sesión|session|autenticacion|expir/i.test(error.message)) throw error;
       this.log("La sesión expiró; iniciando sesión nuevamente...");
       await this.relogin();
@@ -2944,7 +2974,9 @@ class SunatClient {
     return {
       action,
       ruc: String(invoice.ruc_emisor || "").trim(),
-      tipo: String(invoice.tipo || "").trim(),
+      // SEE-SOL usa el código de dos dígitos (03 para boleta); SIRE puede
+      // entregarlo como "3".
+      tipo: String(invoice.tipo || "").trim().padStart(2, "0"),
       serie: String(invoice.serie || "").trim(),
       numero: String(invoice.numero || "").trim(),
     };
@@ -2952,7 +2984,7 @@ class SunatClient {
 
   async downloadZip(invoice) {
     return this.withRetry(async () => {
-      const response = await this.context.request.post(this.consultaUrl, {
+      const response = await this.ensureActive().request.post(this.consultaUrl, {
         form: this.invoiceForm(invoice, "descargarFactura"),
         timeout: 120000,
         headers: { Referer: this.consultaReferer },
@@ -3011,7 +3043,7 @@ class SunatClient {
 
   async downloadPdf(invoice) {
     return this.withRetry(async () => {
-      const response = await this.context.request.post(this.consultaUrl, {
+      const response = await this.ensureActive().request.post(this.consultaUrl, {
         form: this.invoiceForm(invoice, "descargarComprobanteEnPdf"),
         timeout: 120000,
         headers: { Referer: this.consultaReferer },

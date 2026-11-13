@@ -1,6 +1,6 @@
 {
   "name": "sunat-consulta-bot",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "private": true,
   "description": "Bot local para listar y descargar comprobantes emitidos/recibidos desde el portal SUNAT (SOL)",
   "main": "electron/main.js",

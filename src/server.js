@@ -695,6 +695,10 @@ async function runJob(job, credentials, options) {
     job.status = "processing";
 
     const processInvoice = async (invoice) => {
+      if (job.cancelled) {
+        throw new Error("Consulta cancelada.");
+      }
+
       const record = {
         id: invoice.id,
         tipo: invoice.tipo,
