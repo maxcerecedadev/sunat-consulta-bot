@@ -53,28 +53,23 @@ module.exports = {
 
     const now = new Date();
     const currentPeriod = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}`;
-    // El mes en curso cambia a diario (nuevos comprobantes), los periodos
-    // cerrados son más estables. Se usa una vigencia corta para el mes actual.
+    // El mes en curso cambia a diario (nuevos comprobantes). Un periodo
+    // cerrado ya no cambia salvo ajustes excepcionales: se conserva 24 h.
     return String(periodo) >= currentPeriod
       ? 60 * 60 * 1000
-      : 6 * 60 * 60 * 1000;
+      : 24 * 60 * 60 * 1000;
   },
 
-  sireCachePath({ libro, periodo, fechaIni, fechaFin, docType }) {
+  sireCachePath({ libro, periodo, docType }) {
     const safe = (value) =>
       String(value || "")
         .replace(/[^A-Za-z0-9_.-]+/g, "_")
         .slice(0, 60);
+    // La propuesta se genera por periodo completo y tipo de comprobante.
+    // El rango de fechas elegido por el usuario no forma parte de la clave.
     return path.join(
       this.sireCacheDir,
-      [
-        safe(this.ruc),
-        safe(libro),
-        safe(periodo),
-        safe(docType),
-        safe(fechaIni),
-        safe(fechaFin),
-      ].join("-") + ".txt.gz",
+      `${safe(this.ruc)}-${safe(libro)}-${safe(periodo)}-${safe(docType)}.txt.gz`,
     );
   },
 
@@ -145,7 +140,7 @@ module.exports = {
     // marca como expirado hay que solicitar uno nuevo.
     const waitMs = Math.max(
       30000,
-      Number(process.env.SUNAT_SIRE_TICKET_WAIT_MS) || 210000,
+      Number(process.env.SUNAT_SIRE_TICKET_WAIT_MS) || 600000,
     );
     const pollMs = Math.max(
       1000,
@@ -157,13 +152,7 @@ module.exports = {
     );
 
     const cacheTtlMs = this.sireCacheTtlMs(periodo);
-    const cachePath = this.sireCachePath({
-      libro,
-      periodo,
-      fechaIni,
-      fechaFin,
-      docType,
-    });
+    const cachePath = this.sireCachePath({ libro, periodo, docType });
     const cached = this.readSireCache(cachePath, cacheTtlMs);
     if (cached) {
       const ageMin = Math.max(0, Math.round((Date.now() - cached.savedAt) / 60000));
@@ -171,6 +160,12 @@ module.exports = {
         `Usando propuesta SIRE en caché (${libro === "ventas" ? "RVIE" : "RCE"}, ${periodo}, ${ageMin} min).`,
       );
       return cached.text;
+    }
+
+    if (fs.existsSync(cachePath)) {
+      this.log(
+        `El caché de la propuesta SIRE venció (${libro === "ventas" ? "RVIE" : "RCE"}, ${periodo}); se solicita de nuevo...`,
+      );
     }
 
     const cacheAndReturn = (text) => {
