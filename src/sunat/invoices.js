@@ -53,33 +53,60 @@ module.exports = {
         return this.consultarBoletas({ desde, hasta, tipo });
       }
 
-      this.log(`Consultando SUNAT (${this.documento}, tipo ${tipo}: ${tipoLabel(tipo, this.documento)})...`);
+      // Facturas y notas emitidas: el módulo HTML antiguo puede quedar
+      // deshabilitado o devolver el SPA nuevo sin datos. Si eso pasa, se usa
+      // SIRE Ventas como respaldo (misma fuente que usa el menú de SUNAT).
+      if (["10", "12", "13", "15"].includes(String(tipo))) {
+        try {
+          const invoices = await this.consultarPortal({ desde, hasta, tipo });
+          if (invoices.length > 0) return invoices;
+          this.log(
+            "El portal no devolvió comprobantes; se consulta SIRE Ventas...",
+          );
+        } catch (error) {
+          this.log(
+            `El portal falló (${error.message}); se consulta SIRE Ventas...`,
+          );
+        }
+        return this.consultarSireVentas({ desde, hasta, tipo });
+      }
 
-      const response = await this.context.request.get(this.consultaUrl, {
-        params: {
-          action: "realizarConsulta",
-          buscarPor: "porPer",
-          // El formulario de SUNAT envía estado=0 por defecto.
-          estado: "0",
-          fec_desde: desde,
-          fec_hasta: hasta,
-          tipoConsulta: String(tipo),
-          // El formulario de SUNAT siempre envía el campo "RUC Emisor" (vacío
-          // si no se filtra). En "Facturas recibidas" el módulo lo lee aunque
-          // se consulte por periodo; si el parámetro no llega, responde con
-          // codeError 1.
-          ruc: "",
-        },
-        timeout: 90000,
-        headers: {
-          Accept: "text/html,application/xhtml+xml",
-          Referer: this.consultaReferer,
-        },
-      });
-
-      const html = await response.text();
-      return this.parseConsultaHtml(html).map(normalizeInvoice);
+      return this.consultarPortal({ desde, hasta, tipo });
     });
+  },
+
+  async consultarPortal({ desde, hasta, tipo = 10 }) {
+    this.log(
+      `Consultando SUNAT (${this.documento}, tipo ${tipo}: ${tipoLabel(
+        tipo,
+        this.documento,
+      )})...`,
+    );
+
+    const response = await this.context.request.get(this.consultaUrl, {
+      params: {
+        action: "realizarConsulta",
+        buscarPor: "porPer",
+        // El formulario de SUNAT envía estado=0 por defecto.
+        estado: "0",
+        fec_desde: desde,
+        fec_hasta: hasta,
+        tipoConsulta: String(tipo),
+        // El formulario de SUNAT siempre envía el campo "RUC Emisor" (vacío
+        // si no se filtra). En "Facturas recibidas" el módulo lo lee aunque
+        // se consulte por periodo; si el parámetro no llega, responde con
+        // codeError 1.
+        ruc: "",
+      },
+      timeout: 90000,
+      headers: {
+        Accept: "text/html,application/xhtml+xml",
+        Referer: this.consultaReferer,
+      },
+    });
+
+    const html = await response.text();
+    return this.parseConsultaHtml(html).map(normalizeInvoice);
   },
 
   parseConsultaHtml(html) {

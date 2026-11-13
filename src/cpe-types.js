@@ -36,9 +36,21 @@ function tipoLabel(tipo, documento = "factura") {
   return documento === "boleta" ? label.replace(/^Facturas/, "Boletas") : label;
 }
 
+/**
+ * Tipo de comprobante que espera la propuesta RVIE de SIRE Ventas.
+ * Facturas = 01, boletas = 03, notas de crédito = 07, notas de débito = 08.
+ */
+function sireVentasDocType(tipo, documento = "boleta") {
+  const code = String(tipo);
+  if (code === "13") return "07";
+  if (code === "15") return "08";
+  return documento === "boleta" ? "03" : "01";
+}
+
 module.exports = {
   TIPOS,
   TIPO_LABELS,
   DOCUMENTOS,
   tipoLabel,
+  sireVentasDocType,
 };

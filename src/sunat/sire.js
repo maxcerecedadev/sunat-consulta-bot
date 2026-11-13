@@ -6,7 +6,13 @@ const zlib = require("zlib");
 const AdmZip = require("adm-zip");
 const { chromium } = require("playwright");
 const { parseUbl } = require("../ubl");
-const { TIPOS, TIPO_LABELS, DOCUMENTOS, tipoLabel } = require("../cpe-types");
+const {
+  TIPOS,
+  TIPO_LABELS,
+  DOCUMENTOS,
+  tipoLabel,
+  sireVentasDocType,
+} = require("../cpe-types");
 const {
   tipoCpeVariants,
   filtrosCpe,
@@ -93,8 +99,7 @@ module.exports = {
   },
 
   async consultarSireVentas({ desde, hasta, tipo = 10 }) {
-    const docType =
-      String(tipo) === "13" ? "07" : String(tipo) === "15" ? "08" : "03";
+    const docType = sireVentasDocType(tipo, this.documento);
     const [, fromMonth, fromYear] = String(desde).split("/").map(Number);
     const [, toMonth, toYear] = String(hasta).split("/").map(Number);
     const fromIso = sunatToIsoDate(desde);
@@ -136,7 +141,7 @@ module.exports = {
       ).padStart(2, "0")}`;
 
       this.log(
-        `Consultando SIRE Ventas (${tipoLabel(tipo, "boleta")}, periodo ${periodo})...`,
+        `Consultando SIRE Ventas (${tipoLabel(tipo, this.documento)}, periodo ${periodo})...`,
       );
 
       if (!this.menuTokens.ventas) {
