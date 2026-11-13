@@ -1,26 +1,13 @@
 "use strict";
 
-const { app, PORT, HOST, DATA_DIR } = require("./server/state");
+const { app, PORT, HOST } = require("./server/state");
 const { openBrowser, loadHistory } = require("./server/helpers");
 const { startBuzonScheduler } = require("./server/scheduler");
 
 require("./server/routes-core");
 require("./server/routes-buzon");
 require("./server/routes-jobs");
-
-app.get("*", (req, res, next) => {
-  if (req.path.startsWith("/api/")) return next();
-
-  const indexFile = path.join(UI_DIR, "index.html");
-  if (!fs.existsSync(indexFile)) {
-    return res
-      .status(503)
-      .send("La UI no está compilada. Ejecuta: npm run build:ui (o npm run ui).");
-  }
-
-  res.sendFile(indexFile);
-});
-
+require("./server/routes-fallback");
 
 loadHistory();
 startBuzonScheduler();
@@ -41,4 +28,5 @@ server.on("error", (error) => {
     process.exit(1);
   }
 
-  throw error;});
+  throw error;
+});

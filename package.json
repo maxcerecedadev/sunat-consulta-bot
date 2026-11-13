@@ -1,6 +1,6 @@
 {
   "name": "sunat-consulta-bot",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "private": true,
   "description": "Bot local para listar y descargar comprobantes emitidos/recibidos desde el portal SUNAT (SOL)",
   "main": "electron/main.js",
@@ -20,7 +20,7 @@
     "test": "node --test",
     "doctor": "node src/cli.js --doctor",
     "install:browser": "npx playwright install chromium",
-    "check": "node --check src/cli.js && node --check src/server.js && node --check src/sunat-client.js && node --check src/cpe-types.js && node --check src/cpe-ids.js && node --check src/sire-parser.js && node --check src/ubl.js && node --check src/exporters.js && node --check src/dates.js && node --check src/util.js && node --check src/empresas.js && node --check src/secrets.js && node --check src/buzon-store.js && node --check src/buzon-service.js && node --check src/whatsapp.js && node --check src/whatsapp-baileys.js && node --check src/buzon-cli.js && node --check electron/main.js && node --check scripts/install-browsers-local.js && node --test",
+    "check": "node --check src/cli.js && node --check src/server.js && node --check src/server/routes-fallback.js && node --check src/sunat-client.js && node --check src/cpe-types.js && node --check src/cpe-ids.js && node --check src/sire-parser.js && node --check src/ubl.js && node --check src/exporters.js && node --check src/dates.js && node --check src/util.js && node --check src/empresas.js && node --check src/secrets.js && node --check src/buzon-store.js && node --check src/buzon-service.js && node --check src/whatsapp.js && node --check src/whatsapp-baileys.js && node --check src/buzon-cli.js && node --check electron/main.js && node --check scripts/install-browsers-local.js && node --test",
     "electron:dev": "npm run build:ui && electron .",
     "dist:win": "npm run build:ui && npm run install:browsers:local && electron-builder --win nsis portable --publish never",
     "dist:win:dir": "npm run build:ui && npm run install:browsers:local && electron-builder --win --dir --publish never",
