@@ -6,6 +6,18 @@ const zlib = require("zlib");
 const AdmZip = require("adm-zip");
 const { chromium } = require("playwright");
 const { parseUbl } = require("./ubl");
+const { TIPOS, TIPO_LABELS, DOCUMENTOS, tipoLabel } = require("./cpe-types");
+const {
+  tipoCpeVariants,
+  filtrosCpe,
+  buildCpeComprobanteId,
+  buildCpeDescargaUrl,
+  esBoleta,
+} = require("./cpe-ids");
+const {
+  parseSireComprasTxt,
+  parseSireVentasTxt,
+} = require("./sire-parser");
 
 const CONSULTA_URL =
   process.env.SUNAT_CONSULTA_URL ||
@@ -32,42 +44,11 @@ const BUZON_DETAIL_ROUTE = "**/ol-ti-itvisornoti/visor/obtenerDetalleNoti*";
 const TIPOS_RECIBIDOS = new Set(["11", "14", "16"]);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const TIPOS = {
-  10: "Facturas emitidas",
-  11: "Facturas recibidas",
-  12: "Facturas rechazadas",
-  13: "Notas de crédito emitidas",
-  14: "Notas de crédito recibidas",
-  15: "Notas de débito emitidas",
-  16: "Notas de débito recibidas",
-};
-
-const TIPO_LABELS = {
-  "01": "Factura",
-  "03": "Boleta",
-  "07": "Nota de crédito",
-  "08": "Nota de débito",
-};
-
-const DOCUMENTOS = {
-  factura: "Facturas",
-  boleta: "Boletas",
-};
-
 // SUNAT responde con codeError != 0 cuando no hay resultados (por ejemplo en
 // "Facturas recibidas" si el periodo no tiene comprobantes). No es un fallo de
 // la consulta: el listado simplemente está vacío.
 const SIN_RESULTADOS_RE =
   /no\s+(?:se\s+)?(?:encontr|existen|hay|existe)|sin\s+(?:resultados|registros|comprobantes|informaci[oó]n)|no\s+existen\s+(?:registros|comprobantes|documentos|informaci[oó]n)/i;
-
-/**
- * El código 10-16 es el mismo para el módulo de facturas y el de boletas;
- * solo cambia el módulo que se abre en el menú de SUNAT.
- */
-function tipoLabel(tipo, documento = "factura") {
-  const label = TIPOS[tipo] || String(tipo);
-  return documento === "boleta" ? label.replace(/^Facturas/, "Boletas") : label;
-}
 
 function decodeEntities(value) {
   return String(value)
@@ -113,15 +94,6 @@ function freshState(statePath) {
   }
 }
 
-function normalizeKey(value) {
-  return String(value || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
-
 function menuTextRegex(label) {
   const words = String(label)
     .replace(/\s*[-–]\s*/g, " ")
@@ -140,21 +112,6 @@ function menuTextRegex(label) {
     );
 
   return new RegExp(words.join("\\s*[-–]?\\s*"), "i");
-}
-
-function sireValue(row, ...names) {
-  const entries = Object.entries(row || {});
-  for (const name of names) {
-    const wanted = normalizeKey(name);
-    const match = entries.find(([key]) => normalizeKey(key) === wanted);
-    if (match && String(match[1]).trim() !== "") return String(match[1]).trim();
-  }
-  return "";
-}
-
-function toSireNumber(value) {
-  const parsed = Number(String(value || "").replace(/,/g, ""));
-  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function normalizeInvoice(raw) {
@@ -1792,14 +1749,20 @@ class SunatClient {
         const url = frame.url();
         if (!url.includes("token=") || !url.includes(match)) continue;
         const tokenMatch = url.match(/[?&]token=([^&]+)/);
-        if (tokenMatch) return decodeURIComponent(tokenMatch[1]);
+        if (tokenMatch) {
+          if (match === "consultacpe") await this.restoreMenuView(page);
+          return decodeURIComponent(tokenMatch[1]);
+        }
       }
 
       // El SPA nuevo de consulta CPE guarda el token en sessionStorage, no en
       // la URL. Leerlo ahí evita usar un token viejo que el API rechaza.
       if (match === "consultacpe") {
         const sessionToken = await this.readConsultacpeSessionToken(page);
-        if (sessionToken) return sessionToken;
+        if (sessionToken) {
+          await this.restoreMenuView(page);
+          return sessionToken;
+        }
       }
 
       if (/loginMenuSol/i.test(page.url())) throw new Error("La sesión SOL expiró.");
@@ -1807,6 +1770,25 @@ class SunatClient {
     }
 
     throw new Error(`No se pudo obtener el token de SUNAT (${description}).`);
+  }
+
+  /**
+   * El menú abre el SPA de consulta CPE en el iframe y SUNAT lo deja en una
+   * página 404 cuando ya se capturó el token. Se restaura el menú para que la
+   * ventana visible no quede mostrando ese error.
+   */
+  async restoreMenuView(page) {
+    for (const candidate of page.context().pages()) {
+      if (candidate === page) continue;
+      if (/e-factura\.sunat\.gob\.pe/i.test(candidate.url())) {
+        await candidate.close().catch(() => undefined);
+      }
+    }
+
+    await page
+      .goto(MENU_URLS[0], { waitUntil: "domcontentloaded", timeout: 60000 })
+      .catch(() => undefined);
+    await page.waitForTimeout(1000);
   }
 
   async readConsultacpeSessionToken(page) {
@@ -2390,205 +2372,11 @@ class SunatClient {
   }
 
   parseSireTxt(text, docType) {
-    const clean = String(text || "").replace(/^\uFEFF/, "");
-    const lines = clean.split(/\r?\n/).filter((line) => line.trim() !== "");
-    if (lines.length < 2) return [];
-
-    const headers = lines[0].split("|").map((header) => header.trim());
-    const invoices = [];
-
-    for (const line of lines.slice(1)) {
-      const cols = line.split("|");
-      const row = {};
-      headers.forEach((header, index) => {
-        row[header] = cols[index] ?? "";
-      });
-
-      const rowType = sireValue(row, "Tipo CP/Doc.", "Tipo CP/Doc");
-      if (docType && rowType && rowType !== docType) continue;
-
-      const rucEmisor = sireValue(row, "Nro Doc Identidad");
-      const serie = sireValue(row, "Serie del CDP");
-      let numero = sireValue(
-        row,
-        "Nro CP o Doc. Nro Inicial (Rango)",
-        "Nro CP o Doc. Nro Inicial",
-      );
-
-      if (!rucEmisor || !serie || !numero) continue;
-      if (/^\d+$/.test(numero)) numero = String(Number(numero));
-
-      const tipo = rowType || docType;
-      const estadoRaw = sireValue(
-        row,
-        "Est. Comp.",
-        "Est. Comprobante",
-        "Estado",
-        "Estado del comprobante",
-      );
-      const estado =
-        estadoRaw === "1"
-          ? "Aceptado"
-          : estadoRaw === "0"
-            ? "No aceptado"
-            : estadoRaw === "2"
-              ? "Rechazado"
-              : estadoRaw === "3"
-                ? "Anulado"
-                : estadoRaw || "Aceptado";
-
-      invoices.push({
-        id: `${tipo}|${serie}|${numero}|${rucEmisor}`,
-        tipo,
-        tipo_label: TIPO_LABELS[tipo] || tipo || "Comprobante",
-        serie,
-        numero,
-        numero_desc: `${serie} - ${numero}`,
-        fecha: sireValue(row, "Fecha de emisión", "Fecha de emision"),
-        ruc_emisor: rucEmisor,
-        emisor: sireValue(
-          row,
-          "Apellidos Nombres/ Razón Social",
-          "Apellidos Nombres/ Razon Social",
-        ),
-        ruc_receptor: sireValue(row, "RUC") || this.ruc,
-        receptor: sireValue(
-          row,
-          "Apellidos y Nombres o Razón social",
-          "Apellidos y Nombres o Razon social",
-        ),
-        total: toSireNumber(sireValue(row, "Total CP")),
-        moneda: sireValue(row, "Moneda"),
-        estado,
-        sire: true,
-        raw: row,
-      });
-    }
-
-    return invoices;
+    return parseSireComprasTxt(text, { docType, ruc: this.ruc });
   }
 
   parseSireVentasTxt(text, docType) {
-    const clean = String(text || "").replace(/^\uFEFF/, "");
-    const lines = clean.split(/\r?\n/).filter((line) => line.trim() !== "");
-    if (lines.length < 2) return [];
-
-    const headers = lines[0].split("|").map((header) => header.trim());
-    const invoices = [];
-
-    for (const line of lines.slice(1)) {
-      const cols = line.split("|");
-      const row = {};
-      headers.forEach((header, index) => {
-        row[header] = cols[index] ?? "";
-      });
-
-      const rowType = sireValue(row, "Tipo CP/Doc.", "Tipo CP/Doc");
-      if (docType && rowType && rowType !== docType) continue;
-
-      const serie = sireValue(row, "Serie del CDP");
-      const numeroIniRaw = sireValue(
-        row,
-        "Nro CP o Doc. Nro Inicial (Rango)",
-        "Nro CP o Doc. Nro Inicial",
-      );
-      const numeroFinRaw = sireValue(
-        row,
-        "Nro Final (Rango)",
-        "Nro CP o Doc. Nro Final",
-        "Nro final",
-        "Nro Final",
-      );
-
-      if (!serie || !numeroIniRaw) continue;
-
-      const numeros = [];
-      const rango = /^(\d+)\s*-\s*(\d+)$/.exec(numeroIniRaw);
-
-      if (rango) {
-        const inicio = Number(rango[1]);
-        const fin = Number(rango[2]);
-        for (let n = inicio; n <= fin && numeros.length < 5000; n++) {
-          numeros.push(String(n));
-        }
-      } else if (/^\d+$/.test(numeroIniRaw)) {
-        const inicio = Number(numeroIniRaw);
-        if (/^\d+$/.test(numeroFinRaw) && Number(numeroFinRaw) > inicio) {
-          const fin = Number(numeroFinRaw);
-          for (let n = inicio; n <= fin && numeros.length < 5000; n++) {
-            numeros.push(String(n));
-          }
-        } else {
-          numeros.push(String(inicio));
-        }
-      } else {
-        numeros.push(numeroIniRaw.trim());
-      }
-
-      const tipo = rowType || docType;
-      const estadoRaw = sireValue(
-        row,
-        "Est. Comp.",
-        "Est. Comprobante",
-        "Estado",
-        "Estado del comprobante",
-      );
-      const estado =
-        estadoRaw === "1"
-          ? "Aceptado"
-          : estadoRaw === "0"
-            ? "No aceptado"
-            : estadoRaw === "2"
-              ? "Rechazado"
-              : estadoRaw === "3"
-                ? "Anulado"
-                : estadoRaw || "Aceptado";
-      const esRango = numeros.length > 1;
-
-      for (const numero of numeros) {
-        invoices.push({
-          id: `${tipo}|${serie}|${numero}|${this.ruc}`,
-          tipo,
-          tipo_label: TIPO_LABELS[tipo] || tipo || "Comprobante",
-          serie,
-          numero,
-          numero_desc: `${serie} - ${numero}`,
-          fecha: sireValue(
-            row,
-            "Fecha de emisión",
-            "Fecha de emision",
-            "Fecha Emisión",
-            "Fecha Emision",
-            "Fecha de Emisión",
-            "Fec. Emisión",
-            "Fec Emisión",
-            "Fec. Emision",
-            "Fec Emision",
-            "Fecha",
-          ),
-          ruc_emisor: this.ruc,
-          emisor: "",
-          ruc_receptor: esRango
-            ? ""
-            : sireValue(row, "Nro Doc Identidad", "Nro Doc. Identidad"),
-          receptor: esRango
-            ? ""
-            : sireValue(
-                row,
-                "Apellidos Nombres/ Razón Social",
-                "Apellidos Nombres/ Razon Social",
-              ),
-          total: esRango ? null : toSireNumber(sireValue(row, "Total CP")),
-          moneda: sireValue(row, "Moneda"),
-          estado,
-          emitido: true,
-          cpe: true,
-          raw: row,
-        });
-      }
-    }
-
-    return invoices;
+    return parseSireVentasTxt(text, { docType, ruc: this.ruc });
   }
 
   async consultarBoletas({ desde, hasta, tipo = 10 }) {
@@ -2614,11 +2402,7 @@ class SunatClient {
     // SUNAT identifica el tipo de comprobante con dos dígitos (03 = boleta).
     // SIRE a veces entrega "3" sin el cero inicial, así que se prueban ambas
     // variantes empezando por la normalizada.
-    const tipoRaw = String(invoice.tipo).trim();
-    const tiposBase = [];
-    for (const value of [tipoRaw.padStart(2, "0"), tipoRaw]) {
-      if (value && !tiposBase.includes(value)) tiposBase.push(value);
-    }
+    const tiposBase = tipoCpeVariants(invoice.tipo);
 
     const cache = this.cpeDownloadPattern;
     const tipos =
@@ -2627,18 +2411,26 @@ class SunatClient {
         : tiposBase;
 
     let lastError = null;
-    // El sufijo es codFiltroCpe: 1 = emisor, 2 = receptor. Las boletas de
+    // El filtro es codFiltroCpe: 1 = emisor, 2 = receptor. Las boletas de
     // SIRE Ventas se consultan como emisor.
-    const rolesBase = invoice.emitido ? ["-1", "-2"] : ["-2", "-1"];
-    const roles =
-      cache && rolesBase.includes(cache.role)
-        ? [cache.role, ...rolesBase.filter((role) => role !== cache.role)]
-        : rolesBase;
+    const filtrosBase = filtrosCpe(invoice.emitido);
+    const filtros =
+      cache && filtrosBase.includes(cache.filtro)
+        ? [cache.filtro, ...filtrosBase.filter((filtro) => filtro !== cache.filtro)]
+        : filtrosBase;
 
-    for (const role of roles) {
+    for (const filtro of filtros) {
       for (const tipo of tipos) {
         for (const numero of numbers) {
-          const url = `${CONSULTACPE_API}/${invoice.ruc_emisor}-${tipo}-${invoice.serie}-${numero}${role}${suffix}`;
+          const url = buildCpeDescargaUrl({
+            baseUrl: CONSULTACPE_API,
+            ruc: invoice.ruc_emisor,
+            tipo,
+            serie: invoice.serie,
+            numero,
+            filtro,
+            formato: String(suffix || "").replace(/^\//, ""),
+          });
 
         for (let attempt = 0; attempt < 6; attempt++) {
           // Se procesa 1 a 1, así que basta un desfase corto para no saturar.
@@ -2654,7 +2446,7 @@ class SunatClient {
             if (!data || !data.valArchivo) {
               throw new Error("SUNAT no devolvió el archivo del comprobante.");
             }
-            this.cpeDownloadPattern = { role, tipo };
+            this.cpeDownloadPattern = { filtro, tipo };
             return Buffer.from(data.valArchivo, "base64");
           }
 
@@ -2707,19 +2499,20 @@ class SunatClient {
 
   async descargarControlcpe(invoice) {
     const token = await this.controlcpeToken();
-    const tipoRaw = String(invoice.tipo).trim();
-    const tipos = [];
-    for (const value of [tipoRaw.padStart(2, "0"), tipoRaw]) {
-      if (value && !tipos.includes(value)) tipos.push(value);
-    }
+    const tipos = tipoCpeVariants(invoice.tipo);
 
     let lastError = null;
-    const roles = invoice.emitido ? ["-1", "-2", ""] : ["-2", "-1", ""];
+    const filtros = [...filtrosCpe(invoice.emitido), ""];
 
-    for (const role of roles) {
+    for (const filtro of filtros) {
       for (const tipo of tipos) {
-        const base = `${invoice.ruc_emisor}-${tipo}-${invoice.serie}-${invoice.numero}`;
-        const id = `${base}${role}`;
+        const id = buildCpeComprobanteId({
+          ruc: invoice.ruc_emisor,
+          tipo,
+          serie: invoice.serie,
+          numero: invoice.numero,
+          filtro,
+        });
         const response = await this.ensureActive().request.get(
           `${CONTROLCPE_API}/consultaxml/${id}`,
           {
@@ -2803,8 +2596,7 @@ class SunatClient {
       // SUNAT y ya no existe. Un 404 en el API individual de una boleta
       // significa que SUNAT no guarda XML/PDF/CDR por boleta: las boletas se
       // informan mediante Resumen Diario y solo existe el resumen.
-      const tipo = String(invoice.tipo || "").trim().padStart(2, "0");
-      if (tipo === "03" && /404|resource not found/i.test(error.message)) {
+      if (esBoleta(invoice.tipo) && /404|resource not found/i.test(error.message)) {
         const missing = new Error(
           `SUNAT no tiene XML/PDF/CDR individual disponible para la boleta ` +
             `${invoice.serie}-${invoice.numero}. Las boletas informadas por ` +
