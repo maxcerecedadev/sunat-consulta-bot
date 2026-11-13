@@ -48,6 +48,14 @@ module.exports = {
       throw new Error("Faltan datos del comprobante para consultarlo en SUNAT.");
     }
 
+    const rucEmisor = String(invoice.ruc_emisor).replace(/\D/g, "");
+    if (!/^\d{11}$/.test(rucEmisor)) {
+      throw new Error(
+        `El comprobante ${invoice.serie}-${invoice.numero} tiene un documento de ` +
+          `emisor no válido (${invoice.ruc_emisor}). El API de CPE solo acepta RUC de 11 dígitos.`,
+      );
+    }
+
     let token = await this.consultacpeToken();
     const numbers = [String(invoice.numero)];
 
@@ -76,12 +84,17 @@ module.exports = {
         ? [cache.filtro, ...filtrosBase.filter((filtro) => filtro !== cache.filtro)]
         : filtrosBase;
 
+    let detener = false;
+
     for (const filtro of filtros) {
+      if (detener) break;
       for (const tipo of tipos) {
+        if (detener) break;
         for (const numero of numbers) {
+          if (detener) break;
           const url = buildCpeDescargaUrl({
             baseUrl: CONSULTACPE_API,
-            ruc: invoice.ruc_emisor,
+            ruc: rucEmisor,
             tipo,
             serie: invoice.serie,
             numero,
@@ -127,6 +140,20 @@ module.exports = {
           if (response.status() === 404 || response.status() === 400) break;
 
           if (response.status() >= 500 || response.status() === 429) {
+            // Error interno genérico del API: reintentar 6 veces solo alarga
+            // la espera. Se prueba una vez más y se deja paso a controlcpe.
+            if (
+              attempt >= 1 &&
+              /error processing your request|internal server error/i.test(message)
+            ) {
+              this.log(
+                `SUNAT devolvió un error interno para ${invoice.serie}-${invoice.numero}; ` +
+                  "se intenta la descarga por controlcpe.",
+              );
+              detener = true;
+              break;
+            }
+
             const wait = [5000, 10000, 20000, 30000, 45000, 60000][attempt] || 60000;
             this.log(
               `SUNAT respondió ${response.status()}${
@@ -162,6 +189,7 @@ module.exports = {
   async descargarControlcpe(invoice) {
     const token = await this.controlcpeToken();
     const tipos = tipoCpeVariants(invoice.tipo);
+    const rucEmisor = String(invoice.ruc_emisor || "").replace(/\D/g, "");
 
     let lastError = null;
     const filtros = [...filtrosCpe(invoice.emitido), ""];
@@ -169,7 +197,7 @@ module.exports = {
     for (const filtro of filtros) {
       for (const tipo of tipos) {
         const id = buildCpeComprobanteId({
-          ruc: invoice.ruc_emisor,
+          ruc: rucEmisor,
           tipo,
           serie: invoice.serie,
           numero: invoice.numero,
