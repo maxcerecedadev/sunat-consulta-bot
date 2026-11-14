@@ -43,6 +43,93 @@ const {
 } = require("./common");
 
 module.exports = {
+  /**
+   * El API `consultacpe` solo entrega comprobantes donde el RUC logueado es el
+   * receptor: si el emisor es el mismo RUC responde 422/104 ("El RUC del emisor
+   * debe ser diferente al RUC logueado"). Los comprobantes propios se bajan
+   * desde el módulo SEE-SOL que se abre en el navegador.
+   */
+  esPropioEmisor(invoice) {
+    const propio = String(this.ruc || "").replace(/\D/g, "");
+    const emisor = String((invoice && invoice.ruc_emisor) || "").replace(/\D/g, "");
+    return Boolean(propio) && emisor === propio;
+  },
+
+  async ensureModuloPropio() {
+    if (this.propioModuloListo) return;
+
+    if (this.closed || !this.page) {
+      throw new Error("Consulta cancelada: la sesión de SUNAT ya está cerrada.");
+    }
+
+    if (this.documento === "boleta") {
+      this.log("Abriendo el módulo SEE-SOL de boletas para descargar los archivos...");
+      try {
+        await this.openModule(this.page, { navigate: false });
+      } catch (error) {
+        this.log(`No se pudo abrir el módulo de boletas: ${error.message}`);
+      }
+    }
+
+    this.propioModuloListo = true;
+  },
+
+  async descargarPropio(invoice, formato = "xml") {
+    const key = `${invoice.serie}-${invoice.numero}`;
+
+    try {
+      await this.ensureModuloPropio();
+
+      if (formato === "pdf") {
+        return {
+          formato,
+          content: await this.downloadPdf(invoice),
+          mime: "application/pdf",
+        };
+      }
+
+      // El ZIP trae XML y CDR: se reutiliza para no descargarlo tres veces.
+      if (!this.propioFiles || this.propioFiles.key !== key) {
+        const zip = await this.downloadZip(invoice);
+        this.propioFiles = { key, files: this.extractFromZip(zip) };
+      }
+
+      const { files } = this.propioFiles;
+
+      if (formato === "cdr") {
+        if (!files.cdr) {
+          throw new Error("SUNAT no devolvió el CDR de este comprobante.");
+        }
+        return {
+          formato,
+          content: Buffer.from(files.cdr, "utf8"),
+          mime: "application/xml",
+          filename: files.cdrName,
+        };
+      }
+
+      return {
+        formato: "xml",
+        content: Buffer.from(files.xml, "utf8"),
+        mime: "application/xml",
+        filename: files.xmlName,
+        cdr: files.cdr,
+        cdrName: files.cdrName,
+      };
+    } catch (error) {
+      if (this.closed) throw error;
+
+      const missing = new Error(
+        `${error.message} | SUNAT no entrega por el API los comprobantes emitidos por tu ` +
+          `propio RUC; descarga ${invoice.serie}-${invoice.numero} desde SOL ` +
+          "(Empresas → Comprobantes de pago → SEE-SOL) o desde el sistema con el que " +
+          "emitiste la boleta.",
+      );
+      missing.permanent = true;
+      throw missing;
+    }
+  },
+
   async descargarConsultacpe(invoice, suffix) {
     if (!invoice.ruc_emisor || !invoice.tipo || !invoice.serie || !invoice.numero) {
       throw new Error("Faltan datos del comprobante para consultarlo en SUNAT.");
@@ -137,6 +224,19 @@ module.exports = {
             `${message || `SUNAT respondió ${response.status()} al descargar el comprobante.`} (${url})`,
           );
 
+          // El API de consulta no acepta comprobantes emitidos por el propio
+          // RUC logueado: reintentar o probar otro filtro solo repite el error.
+          if (
+            response.status() === 422 &&
+            /RUC del emisor debe ser diferente al RUC logueado|"codError"\s*:\s*"104"/i.test(
+              message,
+            )
+          ) {
+            lastError.emisorPropio = true;
+            lastError.permanent = true;
+            throw lastError;
+          }
+
           if (response.status() === 404 || response.status() === 400) break;
 
           if (response.status() >= 500 || response.status() === 429) {
@@ -172,7 +272,7 @@ module.exports = {
 
     // Respaldo: el API individual puede responder 500 para comprobantes
     // recibidos. El módulo controlcpe entrega el mismo ZIP por otro endpoint.
-    if (invoice.cpe || invoice.sire) {
+    if ((invoice.cpe || invoice.sire) && !(lastError && lastError.permanent)) {
       this.log(
         `Se intenta descargar ${invoice.serie}-${invoice.numero} por controlcpe...`,
       );

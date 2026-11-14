@@ -20,6 +20,8 @@ class SunatClient {
     this.buzonDetailRouteHandler = null;
     this.allowBuzonDetail = false;
     this.cpeDownloadPattern = null;
+    this.propioModuloListo = false;
+    this.propioFiles = null;
     this.lastBuzonRequestAt = 0;
     this.headless = options.headless !== false;
     this.consultaUrl = CONSULTA_URL;

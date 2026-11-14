@@ -160,7 +160,14 @@ module.exports = {
   },
 
   async descargar(invoice, formato = "xml") {
-    if (invoice.sire || invoice.cpe) return this.descargarCpe(invoice, formato);
+    if (invoice.sire || invoice.cpe) {
+      // El API de consulta solo sirve para comprobantes recibidos. Los
+      // emitidos por el propio RUC se descargan desde el módulo SEE-SOL.
+      if (this.esPropioEmisor(invoice)) {
+        return this.descargarPropio(invoice, formato);
+      }
+      return this.descargarCpe(invoice, formato);
+    }
 
     if (formato === "pdf") {
       return { formato, content: await this.downloadPdf(invoice), mime: "application/pdf" };
@@ -191,7 +198,9 @@ module.exports = {
 
   async detalle(invoice) {
     if (invoice.sire || invoice.cpe) {
-      const xml = await this.descargarCpe(invoice, "xml");
+      const xml = this.esPropioEmisor(invoice)
+        ? await this.descargarPropio(invoice, "xml")
+        : await this.descargarCpe(invoice, "xml");
       return {
         detail: parseUbl(xml.content.toString("utf8")),
         cdr: xml.cdr || null,

@@ -76,6 +76,8 @@ module.exports = {
     this.buzonDetailRouteHandler = null;
     this.allowBuzonDetail = false;
     this.cpeDownloadPattern = null;
+    this.propioModuloListo = false;
+    this.propioFiles = null;
     this.menuTokens = {};
 
     const useStored = !this.sire && !forceLogin && freshState(this.statePath);
