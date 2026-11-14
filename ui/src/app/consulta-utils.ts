@@ -100,6 +100,13 @@ function historyStatus(item: HistoryItem) {
       };
     }
 
+    if (item.status === "interrupted") {
+      return {
+        label: "Interrumpida",
+        className: "border-border/70 bg-muted/40 text-muted-foreground",
+      };
+    }
+
     if (["queued", "login", "listing", "processing"].includes(item.status)) {
       return { label: "En proceso", className: "" };
     }

@@ -101,6 +101,29 @@ function isBrowserClosedError(error) {
 }
 
 
+const ACTIVE_JOB_STATUSES = ["queued", "login", "listing", "processing"];
+
+/**
+ * Una consulta que quedó "en curso" en disco sólo puede venir de una corrida
+ * interrumpida (la app se cerró o se reinició). No es un error de SUNAT, así
+ * que se marca como interrumpida para no confundirla con una consulta fallida.
+ */
+function normalizeHistoryEntry(data) {
+  if (ACTIVE_JOB_STATUSES.includes(data.status)) {
+    data.status = "interrupted";
+    data.message =
+      "Consulta interrumpida: la aplicación se cerró o reinició antes de terminar.";
+    data.error = "";
+  } else if (!["done", "error", "cancelled", "interrupted"].includes(data.status)) {
+    data.status = "error";
+    data.error = data.error || "Consulta interrumpida.";
+    data.message = "Consulta interrumpida (el servidor se reinició).";
+  }
+
+  return data;
+}
+
+
 function loadHistory() {
   if (!fs.existsSync(OUTPUT_ROOT)) return;
 
@@ -113,16 +136,12 @@ function loadHistory() {
     if (!fs.existsSync(file)) continue;
 
     try {
-      const data = JSON.parse(fs.readFileSync(file, "utf8"));
+      const data = normalizeHistoryEntry(
+        JSON.parse(fs.readFileSync(file, "utf8")),
+      );
       if (!data.id) data.id = dir.name;
 
       data.outputDir = path.join(OUTPUT_ROOT, dir.name);
-
-      if (!["done", "error", "cancelled"].includes(data.status)) {
-        data.status = "error";
-        data.error = data.error || "Consulta interrumpida.";
-        data.message = "Consulta interrumpida (el servidor se reinició).";
-      }
 
       data.hasOutput = fs.existsSync(
         path.join(data.outputDir, "comprobantes.csv"),
@@ -164,6 +183,7 @@ module.exports = {
   jobStats,
   sunatDate,
   isBrowserClosedError,
+  normalizeHistoryEntry,
   loadHistory,
   openBrowser,
 };

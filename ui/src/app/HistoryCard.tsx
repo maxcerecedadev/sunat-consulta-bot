@@ -80,21 +80,24 @@ export function HistoryCard({
                   {history.map((item) => {
                     const status = historyStatus(item);
                     const stats = item.stats;
-                    const filesSummary = stats
-                      ? stats.total === 0
-                        ? "Sin comprobantes"
-                        : stats.soloListar
-                          ? "Solo listado"
-                          : [
-                              `${stats.files} archivo(s)`,
-                              stats.errors > 0 ? `${stats.errors} error(es)` : "",
-                              stats.cdrFaltantes > 0
-                                ? `${stats.cdrFaltantes} sin CDR`
-                                : "",
-                            ]
-                              .filter(Boolean)
-                              .join(" · ")
-                      : "";
+                    const filesSummary =
+                      item.status === "interrupted"
+                        ? "—"
+                        : stats
+                        ? stats.total === 0
+                          ? "Sin comprobantes"
+                          : stats.soloListar
+                            ? "Solo listado"
+                            : [
+                                `${stats.files} archivo(s)`,
+                                stats.errors > 0 ? `${stats.errors} error(es)` : "",
+                                stats.cdrFaltantes > 0
+                                  ? `${stats.cdrFaltantes} sin CDR`
+                                  : "",
+                              ]
+                                .filter(Boolean)
+                                .join(" · ")
+                        : "";
 
                     return (
                     <TableRow key={item.id}>
