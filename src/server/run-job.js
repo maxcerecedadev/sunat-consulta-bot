@@ -47,7 +47,7 @@ const {
 
 
 const { clients, DATA_DIR } = require("./state");
-const { jobStats } = require("./helpers");
+const { jobStats, sunatDate, isBrowserClosedError } = require("./helpers");
 
 async function runJob(job, credentials, options) {
   if (job.cancelled) {
