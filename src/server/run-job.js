@@ -295,7 +295,7 @@ async function runJob(job, credentials, options) {
         .join(" ")
         .slice(0, 600);
       job.message = allPermanent
-        ? `SUNAT no tiene XML/PDF/CDR individual para ${job.invoices.length} boleta(s); ` +
+        ? `SUNAT no entregó XML/PDF/CDR individual para ${job.invoices.length} boleta(s); ` +
           "revisa el detalle (pueden estar informadas por Resumen Diario)."
         : errorCount > 0
           ? `No se descargó ningún archivo: ${errorCount} comprobante(s) con error.`

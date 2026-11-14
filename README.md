@@ -166,7 +166,7 @@ En el historial de la app, cada consulta muestra los archivos descargados (`N ar
 
 1. Inicia sesión en `api-seguridad.sunat.gob.pe` con RUC + usuario + clave SOL.
 2. Según el tipo de consulta:
-   - **Emitidas/rechazadas**: navega el menú SOL hasta **Empresas → Comprobantes de pago → SEE - SOL → Factura Electrónica → Consultar Factura y Nota** (facturas) o **Boleta de Venta Electrónica → Consultar Boleta de Venta y Nota** (boletas), detecta la URL real del iframe y consulta por rango de fechas. Si el módulo del portal no devuelve datos, se usa **SIRE Ventas** como respaldo.
+   - **Emitidas/rechazadas**: obtiene el listado desde **SIRE Ventas** (o desde el módulo del portal, para facturas) y descarga cada comprobante por **Consulta de Comprobante de Pago** (`consultacpe`). Si el API responde 104 (emisor propio no permitido) o no tiene el archivo individual de una boleta (404), usa el módulo **SEE - SOL** (Empresas → Comprobantes de pago → Factura Electrónica / Boleta de Venta Electrónica → Consultar) como respaldo.
    - **Recibidas (11/14/16)**: obtiene el token del menú SOL para **SIRE RCE**, descarga la propuesta del mes y la usa como lista de comprobantes. Luego consulta cada uno en **Consulta de Comprobante de Pago** y baja XML, PDF y CDR.
 3. Extrae el detalle UBL 2.1 desde el XML de cada comprobante.
 4. Guarda todo en la carpeta de salida. Las recibidas se procesan con concurrencia configurable (`SUNAT_CONCURRENCY`, default 2) porque SUNAT tarda ~10 s por archivo.

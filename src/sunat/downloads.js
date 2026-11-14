@@ -161,10 +161,11 @@ module.exports = {
 
   async descargar(invoice, formato = "xml") {
     if (invoice.sire || invoice.cpe) {
-      // El API de consulta solo sirve para comprobantes recibidos. Los
-      // emitidos por el propio RUC se descargan desde el módulo SEE-SOL.
+      // `consultacpe` sí entrega los comprobantes propios cuando SUNAT guarda
+      // el XML individual (por ejemplo, boletas emitidas por SEE-SOL). Se
+      // intenta primero y solo se usa el módulo SEE-SOL como respaldo.
       if (this.esPropioEmisor(invoice)) {
-        return this.descargarPropio(invoice, formato);
+        return this.descargarCpeConRespaldo(invoice, formato);
       }
       return this.descargarCpe(invoice, formato);
     }
@@ -199,7 +200,7 @@ module.exports = {
   async detalle(invoice) {
     if (invoice.sire || invoice.cpe) {
       const xml = this.esPropioEmisor(invoice)
-        ? await this.descargarPropio(invoice, "xml")
+        ? await this.descargarCpeConRespaldo(invoice, "xml")
         : await this.descargarCpe(invoice, "xml");
       return {
         detail: parseUbl(xml.content.toString("utf8")),

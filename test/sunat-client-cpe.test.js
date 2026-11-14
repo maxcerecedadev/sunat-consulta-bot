@@ -47,18 +47,19 @@ test("detecta cuando el emisor es el propio RUC logueado", () => {
   assert.equal(client.esPropioEmisor({}), false);
 });
 
-test("los emitidos por el propio RUC se bajan por SEE-SOL, no por consultacpe", async () => {
+test("los emitidos por el propio RUC se intentan primero por consultacpe", async () => {
   const client = crearCliente();
   let apiLlamada = false;
+  let seeSolLlamado = false;
 
   client.descargarCpe = async () => {
     apiLlamada = true;
     return { formato: "xml", content: Buffer.from("api") };
   };
-  client.descargarPropio = async (_invoice, formato) => ({
-    formato,
-    content: Buffer.from("seesol"),
-  });
+  client.descargarPropio = async (_invoice, formato) => {
+    seeSolLlamado = true;
+    return { formato, content: Buffer.from("seesol") };
+  };
 
   const result = await client.descargar(
     {
@@ -72,8 +73,106 @@ test("los emitidos por el propio RUC se bajan por SEE-SOL, no por consultacpe", 
     "xml",
   );
 
-  assert.equal(apiLlamada, false);
+  assert.equal(apiLlamada, true);
+  assert.equal(seeSolLlamado, false);
+  assert.equal(result.content.toString(), "api");
+});
+
+test("si consultacpe responde 104, el comprobante propio cae a SEE-SOL", async () => {
+  const client = crearCliente();
+  let seeSolLlamado = false;
+
+  client.descargarCpe = async () => {
+    const error = new Error("El RUC del emisor debe ser diferente al RUC logueado");
+    error.emisorPropio = true;
+    error.permanent = true;
+    throw error;
+  };
+  client.descargarPropio = async (_invoice, formato) => {
+    seeSolLlamado = true;
+    return { formato, content: Buffer.from("seesol") };
+  };
+
+  const result = await client.descargar(
+    {
+      ruc_emisor: client.ruc,
+      tipo: "03",
+      serie: "BB01",
+      numero: "1906",
+      emitido: true,
+      cpe: true,
+    },
+    "xml",
+  );
+
+  assert.equal(seeSolLlamado, true);
   assert.equal(result.content.toString(), "seesol");
+});
+
+test("si el API no tiene una boleta (404), se prueba SEE-SOL antes de fallar", async () => {
+  const client = crearCliente();
+  let seeSolLlamado = false;
+
+  client.descargarCpe = async () => {
+    const error = new Error("SUNAT no tiene XML/PDF/CDR individual disponible");
+    error.permanent = true;
+    throw error;
+  };
+  client.descargarPropio = async (_invoice, formato) => {
+    seeSolLlamado = true;
+    return { formato, content: Buffer.from("seesol") };
+  };
+
+  const result = await client.descargar(
+    {
+      ruc_emisor: client.ruc,
+      tipo: "03",
+      serie: "BB01",
+      numero: "1906",
+      emitido: true,
+      cpe: true,
+    },
+    "xml",
+  );
+
+  assert.equal(seeSolLlamado, true);
+  assert.equal(result.content.toString(), "seesol");
+});
+
+test("si el API y SEE-SOL fallan, se informa el detalle de ambas vías", async () => {
+  const client = crearCliente();
+
+  client.descargarCpe = async () => {
+    const error = new Error("Resource not found");
+    error.permanent = true;
+    throw error;
+  };
+  client.descargarPropio = async () => {
+    const error = new Error("SEE-SOL respondió 404");
+    error.permanent = true;
+    throw error;
+  };
+
+  await assert.rejects(
+    client.descargar(
+      {
+        ruc_emisor: client.ruc,
+        tipo: "03",
+        serie: "BB01",
+        numero: "1906",
+        emitido: true,
+        cpe: true,
+      },
+      "xml",
+    ),
+    (error) => {
+      assert.equal(error.permanent, true);
+      assert.match(error.message, /consultacpe:/);
+      assert.match(error.message, /SEE-SOL:/);
+      assert.match(error.message, /Resumen Diario/);
+      return true;
+    },
+  );
 });
 
 test("el 422/104 de emisor propio es permanente y no cae a controlcpe", async () => {
@@ -170,6 +269,46 @@ test("si el módulo SEE-SOL falla, el error es permanente y explica qué hacer",
       return true;
     },
   );
+});
+
+test("si el módulo SEE-SOL falla por sesión o red, el error no es permanente", async () => {
+  const client = crearCliente();
+
+  client.ensureModuloPropio = async () => undefined;
+  client.downloadZip = async () => {
+    throw new Error("La sesión SOL expiró.");
+  };
+
+  await assert.rejects(
+    client.descargarPropio(
+      { ruc_emisor: client.ruc, tipo: "03", serie: "BB01", numero: "1906" },
+      "xml",
+    ),
+    (error) => {
+      assert.notEqual(error.permanent, true);
+      return true;
+    },
+  );
+});
+
+test("si el módulo SEE-SOL no abre, el error se propaga", async () => {
+  const client = crearCliente();
+
+  client.documento = "boleta";
+  client.closed = false;
+  client.page = {};
+  client.openModule = async () => {
+    throw new Error("SUNAT no abrió el módulo de consulta.");
+  };
+
+  await assert.rejects(
+    client.descargarPropio(
+      { ruc_emisor: client.ruc, tipo: "03", serie: "BB01", numero: "1906" },
+      "xml",
+    ),
+    /no abrió el módulo/,
+  );
+  assert.equal(client.propioModuloListo, false);
 });
 
 test("descarga consultacpe normaliza el tipo y usa el filtro de emisor", async () => {

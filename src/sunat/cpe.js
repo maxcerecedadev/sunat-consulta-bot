@@ -44,10 +44,10 @@ const {
 
 module.exports = {
   /**
-   * El API `consultacpe` solo entrega comprobantes donde el RUC logueado es el
-   * receptor: si el emisor es el mismo RUC responde 422/104 ("El RUC del emisor
-   * debe ser diferente al RUC logueado"). Los comprobantes propios se bajan
-   * desde el módulo SEE-SOL que se abre en el navegador.
+   * El API `consultacpe` puede rechazar un comprobante con 422/104 ("El RUC
+   * del emisor debe ser diferente al RUC logueado"). En ese caso, y cuando el
+   * API no tiene el archivo individual de una boleta, se usa el módulo SEE-SOL
+   * que se abre en el navegador.
    */
   esPropioEmisor(invoice) {
     const propio = String(this.ruc || "").replace(/\D/g, "");
@@ -64,18 +64,16 @@ module.exports = {
 
     if (this.documento === "boleta") {
       this.log("Abriendo el módulo SEE-SOL de boletas para descargar los archivos...");
-      try {
-        await this.openModule(this.page, { navigate: false });
-      } catch (error) {
-        this.log(`No se pudo abrir el módulo de boletas: ${error.message}`);
-      }
+      // No se silencia el error: si el módulo no abre, la descarga por esta
+      // vía no puede funcionar y se debe informar (y permitir el reintento).
+      await this.openModule(this.page, { navigate: false });
     }
 
     this.propioModuloListo = true;
   },
 
   async descargarPropio(invoice, formato = "xml") {
-    const key = `${invoice.serie}-${invoice.numero}`;
+    const key = `${invoice.tipo}-${invoice.serie}-${invoice.numero}`;
 
     try {
       await this.ensureModuloPropio();
@@ -119,14 +117,63 @@ module.exports = {
     } catch (error) {
       if (this.closed) throw error;
 
+      // Un 404 o una página sin el comprobante indica que SUNAT no tiene el
+      // archivo individual por esta vía; reintentar no cambia el resultado.
+      // Los errores de sesión, menú o red se dejan pasar para que run-job los
+      // reintente en lugar de darlos por perdidos.
+      const noDisponible =
+        /404|not found|no contiene|sin el comprobante|no devolvi[oó]|inv[aá]lido/i.test(
+          error.message,
+        );
+
+      if (!noDisponible) throw error;
+
       const missing = new Error(
-        `${error.message} | SUNAT no entrega por el API los comprobantes emitidos por tu ` +
-          `propio RUC; descarga ${invoice.serie}-${invoice.numero} desde SOL ` +
-          "(Empresas → Comprobantes de pago → SEE-SOL) o desde el sistema con el que " +
-          "emitiste la boleta.",
+        `SEE-SOL no entregó el ${String(formato).toUpperCase()} de ` +
+          `${invoice.serie}-${invoice.numero}: ${error.message}`,
       );
       missing.permanent = true;
       throw missing;
+    }
+  },
+
+  /**
+   * Descarga un comprobante propio intentando primero `consultacpe`, que sí
+   * entrega las boletas de SEE-SOL. Solo si ese API responde 104 (emisor
+   * propio no permitido) o un 404 de boleta se usa el módulo SEE-SOL abierto
+   * en el navegador.
+   */
+  async descargarCpeConRespaldo(invoice, formato = "xml") {
+    try {
+      return await this.descargarCpe(invoice, formato);
+    } catch (error) {
+      if (this.closed) throw error;
+
+      const usarSeeSol =
+        Boolean(error.emisorPropio) ||
+        (Boolean(error.permanent) && esBoleta(invoice.tipo));
+
+      if (!usarSeeSol) throw error;
+
+      this.log(
+        `consultacpe no entregó ${invoice.serie}-${invoice.numero} ` +
+          `(${error.message.slice(0, 120)}); se intenta por SEE-SOL...`,
+      );
+
+      try {
+        return await this.descargarPropio(invoice, formato);
+      } catch (seeSolError) {
+        if (this.closed) throw seeSolError;
+
+        const missing = new Error(
+          `SUNAT no entregó el ${String(formato).toUpperCase()} individual de ` +
+            `${invoice.serie}-${invoice.numero}. consultacpe: ${error.message} | ` +
+            `SEE-SOL: ${seeSolError.message}. Si la boleta fue informada por ` +
+            "Resumen Diario, SUNAT no guarda el XML/PDF individual.",
+        );
+        missing.permanent = Boolean(seeSolError.permanent);
+        throw missing;
+      }
     }
   },
 
@@ -390,10 +437,11 @@ module.exports = {
         throw error;
       }
 
-      // El módulo SEE-SOL de boletas (ol-ti-itconscpemypebve) fue retirado por
-      // SUNAT y ya no existe. Un 404 en el API individual de una boleta
-      // significa que SUNAT no guarda XML/PDF/CDR por boleta: las boletas se
-      // informan mediante Resumen Diario y solo existe el resumen.
+      // Un 404 en el API individual de una boleta puede significar que SUNAT
+      // no guarda XML/PDF/CDR por boleta (las informadas por Resumen Diario
+      // solo existen dentro del resumen). Se deja el error como permanente
+      // para que run-job no lo reintente en bucle; descargarCpeConRespaldo
+      // probará antes el módulo SEE-SOL.
       if (esBoleta(invoice.tipo) && /404|resource not found/i.test(error.message)) {
         const missing = new Error(
           `SUNAT no tiene XML/PDF/CDR individual disponible para la boleta ` +
